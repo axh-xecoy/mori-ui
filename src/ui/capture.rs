@@ -13,7 +13,8 @@ pub fn start(
         this.library.active_id = None;
     });
     cx.spawn(async move |cx| {
-        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact"].into_iter().enumerate() {
+        let input_only=std::env::var_os("MORI_INPUT_CHECK_ONLY").is_some();
+        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact"].into_iter().enumerate().filter(|(stage,_)| !input_only||*stage==19) {
             let _ = handle.update(cx, |_, window, cx| {
                 view.update(cx, |this, cx| {
                     this.page = Page::Chat; this.model_picker = false; this.library.settings.dark = false;
@@ -62,6 +63,7 @@ pub fn start(
                             assert_eq!(this.provider_url.read(cx).value().as_ref(),"http://localhost:11434");
                             assert_eq!(this.library.providers[0].base_url,"http://localhost:11434");
                             this.page=Page::Settings;
+                            this.settings_tab=SettingsTab::Connections;
                         },
                         12 => {
                             this.new_chat(window,cx); this.toast=None;
@@ -77,7 +79,20 @@ pub fn start(
                             let c=this.current_mut().unwrap(); c.title="数学公式".into(); c.messages.push(Message::new("assistant",content));
                         },
                         13 => this.library.settings.dark=true,
-                        14 => window.resize(size(px(900.),px(640.))), _ => {}
+                        14 => window.resize(size(px(900.),px(640.))),
+                        15 => {window.resize(size(px(1280.),px(860.)));this.page=Page::Settings;this.settings_tab=SettingsTab::General;},
+                        16 => {this.page=Page::Settings;this.settings_tab=SettingsTab::Connections;},
+                        17 => {this.page=Page::Settings;this.settings_tab=SettingsTab::Data;},
+                        18 => {this.page=Page::Settings;this.settings_tab=SettingsTab::General;this.set_language("en",window,cx);this.library.settings.send_on_enter=true;this.composer.update(cx,|s,cx|s.set_submit_on_enter(true,cx));},
+                        19 => {
+                            this.new_chat(window,cx);this.toast=None;
+                            this.composer.update(cx,|s,cx|s.set_value("Describe this image and summarize the attached notes.",window,cx));
+                            let root=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                            this.attach_paths(vec![root.join("assets/mori-128.png"),root.join("README.md")],window,cx);
+                        },
+                        20 => {assert_eq!(this.attachments.len(),2);assert!(this.attachments.iter().any(|a|a.mime.starts_with("image/")));this.library.settings.sidebar_width=360.;},
+                        21 => {window.resize(size(px(900.),px(640.)));this.page=Page::Settings;this.settings_tab=SettingsTab::General;},
+                        22 => {this.page=Page::Settings;this.settings_tab=SettingsTab::Connections;this.provider_picker=false;}, _ => {}
                     }
                     Theme::change(if this.library.settings.dark {ThemeMode::Dark} else {ThemeMode::Light},Some(window),cx);
                     Mori::tint(cx,this.library.settings.dark); cx.notify();
@@ -89,6 +104,50 @@ pub fn start(
             let result=handle.update(cx, |_, window, cx| { let _ = window.draw(cx); window.render_to_image().and_then(|image|image.save(&path).map_err(Into::into)) });
             eprintln!("snapshot {name}: {result:?}");
         }
+        // Exercise the real textarea action dispatch, with no model selected so
+        // submission is observable without sending a network request.
+        for (enter,secondary,shift,submitted) in [(false,false,false,false),(true,false,false,true),(true,false,true,false),(false,true,false,true)] {
+            let _=handle.update(cx,|_,window,cx| {
+                view.update(cx,|this,cx| {
+                    this.page=Page::Chat;this.rename=false;this.model_picker=false;this.image_mode=false;this.attachments.clear();
+                    this.current_mut().unwrap().model.clear();this.library.settings.send_on_enter=enter;
+                    this.composer.update(cx,|s,cx|{s.set_submit_on_enter(enter,cx);s.set_value("keyboard regression",window,cx);s.focus(window,cx);});
+                    cx.notify();
+                });
+                let _=window.draw(cx);
+            });
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            let _=handle.update(cx,|_,window,cx| {
+                let _=window.draw(cx);
+                let action=gpui_kit::component::input::Enter {secondary,shift};
+                let focus=view.read(cx).composer.read(cx).focus_handle(cx);
+                eprintln!("textarea action available={} focused={}",window.is_action_available_in(&action,&focus),focus.is_focused(window));
+                focus.dispatch_action(&action,window,cx);
+            });
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            let result=handle.update(cx,|_,_,cx|view.update(cx,|this,cx| {
+                assert_eq!(this.model_picker,submitted,"Enter routing must match the configured send mode");
+                assert!(this.generation.is_none());
+                let value=this.composer.read(cx).value();
+                assert_eq!(value.contains('\n'),!enter||shift,"Only newline actions may insert a newline");
+                assert_eq!(value.replace('\n',""),"keyboard regression");
+            }));
+            eprintln!("keyboard regression enter={enter} ctrl={secondary} shift={shift}: {result:?}");
+        }
+        let _=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx|{this.library.settings.sidebar_width=252.;window.resize(size(px(1280.),px(860.)));cx.notify();});
+            let _=window.draw(cx);
+        });
+        cx.background_executor().timer(Duration::from_millis(100)).await;
+        let _=handle.update(cx,|_,window,cx| {
+            let _=window.draw(cx);
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,position:point(px(254.),px(200.)),..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent {position:point(px(340.),px(200.)),pressed_button:Some(MouseButton::Left),..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position:point(px(340.),px(200.)),..Default::default()}),cx);
+        });
+        cx.background_executor().timer(Duration::from_millis(100)).await;
+        let result=handle.update(cx,|_,_,cx|view.update(cx,|this,_|{assert_eq!(this.library.settings.sidebar_width,340.);assert!(!this.resizing_sidebar);}));
+        eprintln!("sidebar drag regression: {result:?}");
         cx.update(|cx|cx.quit());
     }).detach();
 }

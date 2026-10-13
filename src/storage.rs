@@ -140,8 +140,15 @@ mod tests {
             "local".into(),
             "general".into(),
         ));
+        lib.settings.language = "en".into();
+        lib.settings.send_on_enter = true;
+        lib.settings.sidebar_width = 324.;
         store.save(&lib).unwrap();
-        assert_eq!(store.load().unwrap().conversations.len(), 1);
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.conversations.len(), 1);
+        assert_eq!(loaded.settings.language, "en");
+        assert!(loaded.settings.send_on_enter);
+        assert_eq!(loaded.settings.sidebar_width, 324.);
         assert!(root.join("library.backup.json").exists());
         std::fs::remove_dir_all(root).unwrap();
     }

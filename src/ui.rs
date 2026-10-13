@@ -1,3 +1,4 @@
+use crate::i18n::tr;
 use crate::{
     model::*,
     provider::{self, Event, Request},
@@ -34,6 +35,7 @@ use std::{
 #[cfg(feature = "visual-test")]
 mod capture;
 mod config;
+mod settings;
 #[cfg(feature = "visual-test")]
 pub use capture::start as capture;
 mod views;
@@ -46,6 +48,12 @@ enum Page {
     Settings,
 }
 const DELETED_NOTICE: &str = "会话已删除。可以撤销这次操作。";
+#[derive(Clone, Copy, PartialEq)]
+enum SettingsTab {
+    General,
+    Connections,
+    Data,
+}
 enum Work {
     Models(String, anyhow::Result<Vec<String>>),
     Transcription(anyhow::Result<String>),
@@ -122,6 +130,9 @@ pub struct Mori {
     model_picker: bool,
     rename: bool,
     sidebar: bool,
+    resizing_sidebar: bool,
+    settings_tab: SettingsTab,
+    provider_picker: bool,
     image_mode: bool,
     attachments: Vec<Attachment>,
     generation: Option<Generation>,
@@ -180,6 +191,7 @@ fn icon(name: &str) -> Icon {
     Icon::default().path(selected.path()).size(px(18.))
 }
 fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, name: &str) -> Button {
+    let label = tr(&label.into());
     Button::new(id)
         .ghost()
         .h(px(32.))
@@ -191,17 +203,20 @@ fn tiny(id: impl Into<ElementId>, name: &str, tooltip: &'static str) -> Button {
         .ghost()
         .size(px(30.))
         .icon(icon(name))
-        .tooltip(tooltip)
+        .tooltip(tr(tooltip))
 }
 fn label(text: impl Into<SharedString>, color: u32) -> Div {
-    div().text_xs().text_color(rgb(color)).child(text.into())
+    div()
+        .text_xs()
+        .text_color(rgb(color))
+        .child(tr(&text.into()))
 }
 fn navigation_button(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
     name: &str,
 ) -> Button {
-    let text = text.into();
+    let text: SharedString = tr(&text.into()).into();
     Button::new(id)
         .ghost()
         .h(px(38.))
@@ -226,13 +241,13 @@ fn heading(title: &str, description: &str, p: Palette) -> Div {
             div()
                 .text_2xl()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(title.to_string()),
+                .child(tr(title)),
         )
         .child(
             div()
                 .text_sm()
                 .text_color(rgb(p.muted))
-                .child(description.to_string()),
+                .child(tr(description)),
         )
 }
 fn field(title: &str, input: impl IntoElement, p: Palette) -> Div {
@@ -274,6 +289,8 @@ impl Mori {
             }
             None => Library::default(),
         };
+        crate::i18n::set_language(&library.settings.language);
+        window.set_window_title(&format!("Mori · {}", tr("留一点空间给灵感")));
         Theme::change(
             if library.settings.dark {
                 ThemeMode::Dark
@@ -286,21 +303,22 @@ impl Mori {
         Self::tint(cx, library.settings.dark);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("有什么想聊的？也可以附上图片或文档…")
+                .placeholder(tr("有什么想聊的？也可以附上图片或文档…"))
+                .submit_on_enter(library.settings.send_on_enter)
                 .auto_grow(3, 9)
         });
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索对话"));
-        let provider_name = cx.new(|cx| InputState::new(window, cx).placeholder("服务商名称"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("搜索对话")));
+        let provider_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("服务商名称")));
         let provider_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://api.example.com/v1"));
         let provider_key = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("新的 API Key（留空保留现有密钥）")
+                .placeholder(tr("新的 API Key（留空保留现有密钥）"))
                 .masked(true)
         });
         let provider_models = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("每行一个模型 ID")
+                .placeholder(tr("每行一个模型 ID"))
                 .auto_grow(3, 6)
         });
         let assistant_name = cx.new(|cx| InputState::new(window, cx));
@@ -322,16 +340,17 @@ impl Mori {
         let transcription_model = cx.new(|cx| {
             InputState::new(window, cx).default_value(library.settings.transcription_model.clone())
         });
-        let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("例如：我的资料库"));
-        let mcp_command =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例如：npx.cmd 或程序的完整路径"));
+        let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("例如：我的资料库")));
+        let mcp_command = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr("例如：npx.cmd 或程序的完整路径"))
+        });
         let mcp_args = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("每行一个启动参数")
+                .placeholder(tr("每行一个启动参数"))
                 .auto_grow(2, 5)
         });
         let mcp_url = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("https://example.com/mcp（本地程序留空）")
+            InputState::new(window, cx).placeholder(tr("https://example.com/mcp（本地程序留空）"))
         });
         let (work_tx, work_rx) = mpsc::channel();
         let subscriptions = vec![
@@ -341,13 +360,10 @@ impl Mori {
                 this.draft_dirty = Some(std::time::Instant::now());
             }),
             cx.subscribe_in(&composer, window, |this, _, event, window, cx| {
-                if matches!(
-                    event,
-                    InputEvent::PressEnter {
-                        secondary: true,
-                        shift: false
-                    }
-                ) {
+                if let InputEvent::PressEnter { secondary, shift } = event
+                    && !shift
+                    && (*secondary || this.library.settings.send_on_enter)
+                {
                     this.send(window, cx);
                 }
             }),
@@ -377,6 +393,9 @@ impl Mori {
             model_picker: false,
             rename: false,
             sidebar: true,
+            resizing_sidebar: false,
+            settings_tab: SettingsTab::General,
+            provider_picker: false,
             image_mode: false,
             attachments: vec![],
             generation: None,
@@ -505,7 +524,8 @@ impl Mori {
                     "general".into(),
                 )
             });
-        let c = Conversation::new(provider, model, assistant);
+        let mut c = Conversation::new(provider, model, assistant);
+        c.title = tr("新的对话");
         self.library.active_id = Some(c.id.clone());
         self.library.conversations.insert(0, c);
         self.composer
@@ -1042,6 +1062,12 @@ impl Mori {
             }
             cx.notify();
         }
+    }
+    fn remove_attachment(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.attachments.retain(|a| a.path != path);
+        self.stash_draft(cx);
+        self.persist();
+        cx.notify();
     }
     fn attachment_target(&mut self, window: &mut Window, cx: &mut Context<Self>) -> String {
         if self.current().is_none() {

@@ -249,6 +249,9 @@ pub struct FunctionConfig {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(default)]
 pub struct Settings {
+    pub language: String,
+    pub send_on_enter: bool,
+    pub sidebar_width: f32,
     pub temperature: f64,
     pub max_tokens: u32,
     pub dark: bool,
@@ -264,6 +267,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            language: "zh-CN".into(),
+            send_on_enter: false,
+            sidebar_width: 252.,
             temperature: 0.7,
             max_tokens: 8192,
             dark: false,
@@ -297,5 +303,20 @@ impl Default for Library {
             settings: Settings::default(),
             active_id: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn older_preferences_keep_their_values_and_gain_safe_defaults() {
+        let settings: Settings =
+            serde_json::from_value(serde_json::json!({"dark":true,"temperature":0.5})).unwrap();
+        assert!(settings.dark);
+        assert_eq!(settings.temperature, 0.5);
+        assert_eq!(settings.language, "zh-CN");
+        assert!(!settings.send_on_enter);
+        assert_eq!(settings.sidebar_width, 252.);
     }
 }

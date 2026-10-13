@@ -13,7 +13,7 @@ impl Mori {
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("连接外部能力"),
+                            .child(tr("连接外部能力")),
                     )
                     .child(label("让助手查资料、使用你连接的服务", p.muted))
                     .child(
@@ -40,7 +40,11 @@ impl Mori {
                 card(p)
                     .flex_1()
                     .child(icon("terminal").size(px(28.)).text_color(rgb(p.accent)))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("本机命令"))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr("本机命令")),
+                    )
                     .child(label("需要时才开启，每次执行前确认", p.muted))
                     .child(
                         button(
@@ -66,7 +70,7 @@ impl Mori {
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("已连接的服务"),
+                    .child(tr("已连接的服务")),
             )
             .when(settings.mcp.is_empty(), |d| {
                 d.child(label(
@@ -125,7 +129,11 @@ impl Mori {
                     )
             }));
         let add = card(p)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("添加服务"))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(tr("添加服务")),
+            )
             .child(field("给它起个名字", Input::new(&self.mcp_name), p))
             .child(field("远程服务地址", Input::new(&self.mcp_url), p))
             .child(
@@ -146,7 +154,7 @@ impl Mori {
                     .child(
                         Button::new("mcp-add")
                             .primary()
-                            .label("添加连接")
+                            .label(tr("添加连接"))
                             .icon(icon("plus"))
                             .on_click(cx.listener(|this, _, w, cx| {
                                 let name = this.mcp_name.read(cx).value().trim().to_string();
@@ -193,7 +201,7 @@ impl Mori {
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("让回答更合心意"),
+                    .child(tr("让回答更合心意")),
             )
             .child(
                 div()
@@ -215,7 +223,7 @@ impl Mori {
             .child(
                 Button::new("save-generation")
                     .primary()
-                    .label("保存偏好")
+                    .label(tr("保存偏好"))
                     .w(px(140.))
                     .on_click(cx.listener(|this, _, w, cx| {
                         let temp = this.temperature.read(cx).value().parse::<f64>();
@@ -248,7 +256,7 @@ impl Mori {
                 .on_click(cx.listener(|this, _, w, cx| { this.show_advanced = !this.show_advanced; if this.show_advanced { this.load_advanced(w, cx); } cx.notify(); })))
             .when(self.show_advanced, |d| d.child(card(p).child(label("可配置 Bash 路径、MCP 环境变量与自定义函数。", p.muted))
                 .child(Textarea::new(&self.advanced).font_family("Cascadia Code").text_sm())
-                .child(Button::new("save-advanced").primary().label("验证并保存").on_click(cx.listener(|this, _, w, cx| {
+                .child(Button::new("save-advanced").primary().label(tr("验证并保存")).on_click(cx.listener(|this, _, w, cx| {
                     match serde_json::from_str::<Settings>(&this.advanced.read(cx).value()) {
                         Ok(s) if s.temperature.is_finite() && (0.0..=2.0).contains(&s.temperature) && s.max_tokens > 0 => {
                             this.library.settings = s;

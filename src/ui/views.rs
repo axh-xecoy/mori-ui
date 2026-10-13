@@ -19,7 +19,7 @@ impl Mori {
         div()
             .flex()
             .flex_col()
-            .w(px(252.))
+            .w(px(self.library.settings.sidebar_width.clamp(220., 380.)))
             .h_full()
             .flex_shrink_0()
             .bg(rgb(p.side))
@@ -47,7 +47,7 @@ impl Mori {
                 Button::new("new-chat")
                     .primary()
                     .icon(icon("plus"))
-                    .label("新的对话")
+                    .label(tr("新的对话"))
                     .w_full()
                     .on_click(cx.listener(|this, _, w, cx| this.new_chat(w, cx))),
             )
@@ -141,9 +141,9 @@ impl Mori {
                                                         "{} · {}",
                                                         c.updated.format("%m/%d"),
                                                         if c.model.is_empty() {
-                                                            "选择一个模型"
+                                                            tr("选择一个模型")
                                                         } else {
-                                                            &c.model
+                                                            c.model.clone()
                                                         }
                                                     )),
                                             ),
@@ -293,13 +293,13 @@ impl Mori {
                                 div()
                                     .text_size(px(if compact { 24. } else { 30. }))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("今天，让想法慢慢生长。"),
+                                    .child(tr("今天，让想法慢慢生长。")),
                             )
                             .child(
                                 div()
                                     .text_sm()
                                     .text_color(rgb(p.muted))
-                                    .child("一个问题、一张图片，或一个还没成形的灵感。"),
+                                    .child(tr("一个问题、一张图片，或一个还没成形的灵感。")),
                             ),
                     )
                     .child(div().grid().grid_cols(2).w_full().gap_3().children(
@@ -316,7 +316,8 @@ impl Mori {
                                 .cursor_pointer()
                                 .hover(|d| d.border_color(rgb(p.accent)).bg(rgb(p.soft)))
                                 .on_click(cx.listener(move |this, _, w, cx| {
-                                    this.composer.update(cx, |s, cx| s.set_value(prompt, w, cx));
+                                    this.composer
+                                        .update(cx, |s, cx| s.set_value(tr(prompt), w, cx));
                                 }))
                                 .child(
                                     div()
@@ -328,13 +329,19 @@ impl Mori {
                                             div()
                                                 .text_sm()
                                                 .font_weight(FontWeight::MEDIUM)
-                                                .child(title),
+                                                .child(tr(title)),
                                         ),
                                 )
-                                .child(div().mt_2().text_xs().text_color(rgb(p.muted)).child(desc))
+                                .child(
+                                    div()
+                                        .mt_2()
+                                        .text_xs()
+                                        .text_color(rgb(p.muted))
+                                        .child(tr(desc)),
+                                )
                         }),
                     ))
-                    .when(!compact, |d| {
+                    .when(!compact && self.attachments.is_empty(), |d| {
                         d.child(label("支持本地模型，也连接你喜欢的 AI 服务", p.muted))
                     }),
             )
@@ -347,6 +354,7 @@ impl Mori {
         let reasoning_id = m.id.clone();
         div()
             .flex()
+            .when(user, |d| d.flex_row_reverse())
             .gap_4()
             .w_full()
             .py_5()
@@ -370,16 +378,24 @@ impl Mori {
                     .gap_3()
                     .flex_1()
                     .min_w_0()
+                    .when(user, |d| {
+                        d.flex_initial()
+                            .max_w(px(680.))
+                            .p_4()
+                            .rounded_xl()
+                            .bg(rgb(p.soft))
+                    })
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_3()
+                            .when(user, |d| d.justify_end())
                             .child(
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(if user { "你" } else { "Mori" }),
+                                    .child(tr(if user { "你" } else { "Mori" })),
                             )
                             .when(!user && m.elapsed_ms > 0, |d| {
                                 d.child(label(
@@ -532,7 +548,7 @@ impl Mori {
                                 } else {
                                     0xa54532
                                 }))
-                                .child(e),
+                                .child(tr(&e)),
                         )
                     })
                     .child(
@@ -631,7 +647,7 @@ impl Mori {
                                     Button::new("approve")
                                         .primary()
                                         .small()
-                                        .label("允许这一次")
+                                        .label(tr("允许这一次"))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             if let Some(a) = this.approval.take() {
                                                 let _ = a.tx.send(true);
@@ -655,17 +671,76 @@ impl Mori {
                     .bg(rgb(p.card))
                     .border_1()
                     .border_color(rgb(p.line))
+                    .id("composer-drop-zone")
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                        style.bg(rgb(p.soft)).border_color(rgb(p.accent))
+                    })
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, w, cx| {
+                        if this.generation.is_none() && !this.media_busy {
+                            this.attach_paths(paths.paths().to_vec(), w, cx);
+                        }
+                        cx.stop_propagation();
+                    }))
                     .when(!self.attachments.is_empty(), |d| {
-                        d.child(div().flex().flex_wrap().gap_2().mb_2().children(
-                            self.attachments.iter().enumerate().map(|(i, a)| {
-                                button(format!("pending-{i}"), a.name.clone(), "x")
-                                    .bg(rgb(p.soft))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.attachments.remove(i);
-                                        cx.notify();
-                                    }))
-                            }),
-                        ))
+                        d.child(
+                            div()
+                                .id("composer-attachments")
+                                .flex()
+                                .gap_2()
+                                .w_full()
+                                .overflow_x_scroll()
+                                .pb_2()
+                                .mb_2()
+                                .children(self.attachments.iter().enumerate().map(|(i, a)| {
+                                    let path = a.path.clone();
+                                    if a.mime.starts_with("image/") {
+                                        div()
+                                            .relative()
+                                            .w(px(96.))
+                                            .flex_shrink_0()
+                                            .child(
+                                                img(std::path::PathBuf::from(&a.path))
+                                                    .size(px(96.))
+                                                    .object_fit(ObjectFit::Cover)
+                                                    .rounded_lg(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .top_1()
+                                                    .right_1()
+                                                    .bg(rgb(p.card))
+                                                    .rounded_full()
+                                                    .child(
+                                                        tiny(
+                                                            format!("remove-image-{i}"),
+                                                            "x",
+                                                            "移除附件",
+                                                        )
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.remove_attachment(&path, cx)
+                                                            },
+                                                        )),
+                                                    ),
+                                            )
+                                            .child(label(a.name.clone(), p.muted).truncate())
+                                            .into_any_element()
+                                    } else {
+                                        button(format!("pending-{i}"), a.name.clone(), "file-text")
+                                            .bg(rgb(p.soft))
+                                            .max_w(px(260.))
+                                            .flex_shrink_0()
+                                            .overflow_hidden()
+                                            .tooltip(a.name.clone())
+                                            .child(icon("x"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.remove_attachment(&path, cx)
+                                            }))
+                                            .into_any_element()
+                                    }
+                                })),
+                        )
                     })
                     .child(
                         Textarea::new(&self.composer)
@@ -762,20 +837,27 @@ impl Mori {
                                     .flex()
                                     .items_center()
                                     .gap_3()
-                                    .child(label("Ctrl + Enter 发送", p.muted))
+                                    .child(label(
+                                        if self.library.settings.send_on_enter {
+                                            "Enter 发送 · Shift+Enter 换行"
+                                        } else {
+                                            "Ctrl+Enter 发送 · Enter 换行"
+                                        },
+                                        p.muted,
+                                    ))
                                     .child(if self.generation.is_some() {
                                         Button::new("send")
                                             .primary()
                                             .icon(icon("square"))
                                             .small()
-                                            .label("停止")
+                                            .label(tr("停止"))
                                             .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
                                     } else {
                                         Button::new("send")
                                             .primary()
                                             .icon(icon("arrow-up"))
                                             .small()
-                                            .label("发送")
+                                            .label(tr("发送"))
                                             .disabled(self.media_busy)
                                             .on_click(
                                                 cx.listener(|this, _, w, cx| this.send(w, cx)),
@@ -974,7 +1056,7 @@ impl Mori {
                                                             .py_4()
                                                             .text_sm()
                                                             .text_color(rgb(p.accent))
-                                                            .child("●  Mori 正在思考…"),
+                                                            .child(tr("●  Mori 正在思考…")),
                                                     )
                                                 },
                                             )
@@ -1035,7 +1117,11 @@ impl Mori {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("选择模型"))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr("选择模型")),
+                    )
                     .child(tiny("close-picker", "x", "关闭").on_click(cx.listener(
                         |this, _, _, cx| {
                             this.model_picker = false;
@@ -1081,8 +1167,12 @@ impl Mori {
                     }),
             )
             .child(
-                button("configure-models", "管理服务商", "settings-2")
-                    .on_click(cx.listener(|this, _, w, cx| this.navigate(Page::Settings, w, cx))),
+                button("configure-models", "管理服务商", "settings-2").on_click(cx.listener(
+                    |this, _, w, cx| {
+                        this.settings_tab = SettingsTab::Connections;
+                        this.navigate(Page::Settings, w, cx);
+                    },
+                )),
             )
     }
     fn render_assistants(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -1121,7 +1211,7 @@ impl Mori {
                                 .mt_3()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(a.name.clone()),
+                                .child(tr(&a.name)),
                         )
                         .child(
                             div()
@@ -1148,7 +1238,7 @@ impl Mori {
                             .child(
                                 Button::new("save-assistant")
                                     .primary()
-                                    .label("保存助手")
+                                    .label(tr("保存助手"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         let name =
                                             this.assistant_name.read(cx).value().trim().to_string();
@@ -1199,27 +1289,6 @@ impl Mori {
     fn render_tools(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         self.render_extensions(p, cx)
     }
-    fn render_settings(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
-        let provider = &self.library.providers[self.selected_provider];
-        let protocol = provider.protocol.clone();
-        div().id("settings-page").size_full().max_w(px(960.)).mx_auto().overflow_y_scroll().p_8().flex().flex_col().gap_6()
-        .child(heading("连接你喜欢的模型。","从本地 Ollama 到云端服务，一处管理。API Key 安全保存在系统凭据库。",p))
-        .child(div().flex().flex_wrap().gap_2().children(self.library.providers.iter().enumerate().map(|(i,provider)|button(format!("provider-{}",provider.id),provider.name.clone(),if provider.protocol==Protocol::Ollama{"hard-drive"}else{"cloud"}).when(i==self.selected_provider,|b|b.bg(rgb(p.soft)).text_color(rgb(p.accent))).on_click(cx.listener(move|this,_,w,cx|this.load_provider(i,w,cx)))))
-            .child(tiny("add-provider","plus","添加兼容服务商").on_click(cx.listener(|this,_,w,cx|{this.library.providers.push(Provider{id:id(),name:"自定义服务商".into(),protocol:Protocol::OpenAi,base_url:"https://api.example.com/v1".into(),models:vec![],enabled:true});this.load_provider(this.library.providers.len()-1,w,cx);this.persist();}))))
-        .child(card(p).max_w(px(896.)).child(div().flex().gap_4().child(field("服务商名称",Input::new(&self.provider_name),p).flex_1()).child(field("接口协议",button("protocol",format!("{:?}",protocol),"chevrons-up-down").on_click(cx.listener(|this,_,_,cx|{let p=&mut this.library.providers[this.selected_provider];p.protocol=match p.protocol{Protocol::OpenAi=>Protocol::Ollama,Protocol::Ollama=>Protocol::Anthropic,Protocol::Anthropic=>Protocol::OpenAi};cx.notify();})),p).w(px(200.))))
-            .child(field(if protocol==Protocol::Ollama {"API 地址（Ollama 原生：如 http://localhost:11434，无需 /v1）"}else{"API 地址（含 /v1 等服务商前缀）"},Input::new(&self.provider_url),p)).child(field("API Key",Input::new(&self.provider_key),p)).child(field("模型 ID（可手动填写，每行一个）",Textarea::new(&self.provider_models),p))
-            .child(div().flex().flex_wrap().gap_2().child(Button::new("save-provider").primary().label("保存配置").on_click(cx.listener(|this,_,w,cx|{this.save_provider(w,cx);})))
-                .child(button("fetch-models","连接并获取模型","refresh-cw").on_click(cx.listener(|this,_,w,cx|{if this.save_provider(w,cx){let p=this.library.providers[this.selected_provider].clone();let tx=this.work_tx.clone();this.toast=Some("正在获取模型列表…".into());std::thread::spawn(move||{let result=provider::models(&p);let _=tx.send(Work::Models(p.id,result));});}})))
-                .child(button("provider-enabled",if provider.enabled{"已启用"}else{"已停用"},"power").on_click(cx.listener(|this,_,_,cx|{let p=&mut this.library.providers[this.selected_provider];p.enabled= !p.enabled;this.persist();cx.notify();})))
-                .child(button("clear-key","移除已保存的密钥","key-round").on_click(cx.listener(|this,_,_,cx|{let p=&this.library.providers[this.selected_provider];this.toast=Some(match storage::set_api_key(p,""){Ok(_)=>"已移除系统凭据库中的密钥".into(),Err(e)=>format!("{e:#}")});cx.notify();}))))
-            .child(label("模型能力由服务商和所选模型决定；视觉、PDF、工具、图片生成与语音接口需对应支持。",p.muted)))
-        .child(card(p).max_w(px(896.)).child(div().font_weight(FontWeight::SEMIBOLD).child("你的空间")).child(div().flex().flex_wrap().gap_2()
-            .child(button("theme",if self.library.settings.dark{"切换浅色外观"}else{"切换深色外观"},"sun-moon").on_click(cx.listener(|this,_,w,cx|{this.library.settings.dark= !this.library.settings.dark;Theme::change(if this.library.settings.dark{ThemeMode::Dark}else{ThemeMode::Light},Some(w),cx);Self::tint(cx,this.library.settings.dark);this.persist();cx.notify();})))
-            .child(button("export-library","导出所有会话","download").on_click(cx.listener(|this,_,_,_|this.export(true)))).child(button("import-library","导入会话","upload").on_click(cx.listener(|this,_,_,_|this.import())))
-            .child(button("open-storage","打开数据目录","folder-open").on_click(cx.listener(|this,_,_,cx|{if let Some(s)=&this.store{cx.open_url(&format!("file:///{}",s.root.to_string_lossy().replace('\\',"/")));}}))))
-            .child(label("Mori 0.1.0 · gpui-kit 0.7.3 · Ctrl+N 新对话 · Ctrl+F 搜索 · Ctrl+Enter 发送 · Esc 停止",p.muted)))
-        .when(self.current().is_some(),|d|d.child(button("delete-current","删除当前会话","trash").text_color(rgb(0xb05a48)).disabled(self.generation.is_some()||self.media_busy).on_click(cx.listener(|this,_,w,cx|{if let Some(id)=this.library.active_id.clone(){this.delete_conversation(&id,w,cx);}}))))
-    }
 }
 impl Render for Mori {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1234,6 +1303,34 @@ impl Render for Mori {
             .text_color(rgb(p.ink))
             .font_family("Microsoft YaHei")
             .text_base()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, w, cx| {
+                if this.resizing_sidebar {
+                    let max = (f32::from(w.viewport_size().width) - 500.).clamp(220., 380.);
+                    this.library.settings.sidebar_width =
+                        f32::from(event.position.x).clamp(220., max);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.resizing_sidebar {
+                        this.resizing_sidebar = false;
+                        this.persist();
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.resizing_sidebar {
+                        this.resizing_sidebar = false;
+                        this.persist();
+                        cx.notify();
+                    }
+                }),
+            )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, w, cx| {
                 if this.generation.is_none() && !this.media_busy {
                     this.attach_paths(paths.paths().to_vec(), w, cx);
@@ -1250,10 +1347,8 @@ impl Render for Mori {
                     this.search.update(cx, |s, cx| s.focus(w, cx));
                     cx.notify();
                     cx.stop_propagation();
-                } else if ctrl && key == "enter" && this.page == Page::Chat && !this.rename {
-                    this.send(w, cx);
-                    cx.stop_propagation();
                 } else if key == "escape" {
+                    this.resizing_sidebar = false;
                     if this.generation.is_some() {
                         this.stop(cx);
                     }
@@ -1262,7 +1357,25 @@ impl Render for Mori {
                     cx.notify();
                 }
             }))
-            .when(self.sidebar, |d| d.child(self.render_sidebar(p, cx)))
+            .when(self.sidebar, |d| {
+                d.child(self.render_sidebar(p, cx)).child(
+                    div()
+                        .id("sidebar-resize")
+                        .w(px(5.))
+                        .h_full()
+                        .flex_shrink_0()
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .hover(|style| style.bg(rgb(p.accent)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.resizing_sidebar = true;
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -1292,7 +1405,7 @@ impl Render for Mori {
                                 .bg(rgb(p.soft))
                                 .border_b_1()
                                 .border_color(rgb(p.line))
-                                .child(div().text_sm().flex_1().child(text))
+                                .child(div().text_sm().flex_1().child(tr(&text)))
                                 .when(self.show_undo_delete(), |d| {
                                     d.child(button("undo-delete", "撤销删除", "undo-2").on_click(
                                         cx.listener(|this, _, w, cx| {

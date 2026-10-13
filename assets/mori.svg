@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Mori</title>
+  <desc>A warm ivory conversation bubble with a rounded M on forest green.</desc>
+  <defs>
+    <linearGradient id="forest" x1="64" y1="32" x2="448" y2="480" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#36745B"/>
+      <stop offset="1" stop-color="#1B493A"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="128" fill="url(#forest)"/>
+  <path d="M178 124H334C376 124 404 152 404 194V282C404 324 376 352 334 352H208L144 394V344C120 330 108 309 108 282V194C108 152 136 124 178 124Z" fill="#F4F5E9"/>
+  <path d="M181 282V201C181 188 190 182 199 193L256 255L313 193C322 182 331 188 331 201V282" fill="none" stroke="#28614C" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

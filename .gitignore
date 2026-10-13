@@ -1,0 +1,6 @@
+/target/
+/dist/
+/.mori-*/
+/.mori-*.log
+/.snapshot.log
+*.tmp

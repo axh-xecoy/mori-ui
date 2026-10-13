@@ -1,0 +1,27 @@
+name: Check Mori
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo +stable fmt --check
+      - name: Clippy
+        run: cargo +stable clippy --locked --all-targets --features visual-test -- -D warnings
+      - name: Tests
+        run: cargo +stable test --locked
+      - name: Release build
+        run: cargo +stable build --locked --release

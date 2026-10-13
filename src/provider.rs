@@ -1,0 +1,788 @@
+use crate::{
+    model::*,
+    storage::{Store, api_key, data_url},
+    tools::ToolRegistry,
+};
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use reqwest::blocking::{Client, RequestBuilder};
+use serde_json::{Value, json};
+use std::{
+    io::{BufRead, BufReader},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
+};
+
+pub enum Event {
+    Message(Message),
+    Approval(ToolCall, mpsc::Sender<bool>),
+    Status(String),
+    Error(String),
+    Done,
+}
+#[derive(Clone)]
+pub struct Request {
+    pub provider: Provider,
+    pub conversation: Conversation,
+    pub prompt: String,
+    pub settings: Settings,
+}
+
+fn client() -> Result<Client> {
+    Ok(Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(180))
+        .build()?)
+}
+fn authorize(request: RequestBuilder, provider: &Provider) -> Result<RequestBuilder> {
+    let key = api_key(provider)?;
+    Ok(if key.is_empty() {
+        request
+    } else if provider.protocol == Protocol::Anthropic {
+        request
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+    } else {
+        request.bearer_auth(key)
+    })
+}
+fn checked(response: reqwest::blocking::Response) -> Result<reqwest::blocking::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    bail!(
+        "服务商返回 {status}：{}",
+        body.chars().take(1500).collect::<String>()
+    )
+}
+pub fn models(provider: &Provider) -> Result<Vec<String>> {
+    let endpoint = if provider.protocol == Protocol::Ollama {
+        "api/tags"
+    } else {
+        "models"
+    };
+    let response: Value = checked(
+        authorize(
+            client()?.get(format!(
+                "{}/{endpoint}",
+                provider.base_url.trim_end_matches('/')
+            )),
+            provider,
+        )?
+        .send()?,
+    )?
+    .json()?;
+    let items = if provider.protocol == Protocol::Ollama {
+        &response["models"]
+    } else {
+        &response["data"]
+    };
+    let mut models: Vec<String> = items
+        .as_array()
+        .context("模型列表格式不正确")?
+        .iter()
+        .filter_map(|v| {
+            v[if provider.protocol == Protocol::Ollama {
+                "name"
+            } else {
+                "id"
+            }]
+            .as_str()
+            .map(str::to_string)
+        })
+        .collect();
+    models.sort();
+    models.dedup();
+    Ok(models)
+}
+
+pub fn messages(protocol: &Protocol, history: &[Message], prompt: &str) -> Result<Vec<Value>> {
+    let mut result = vec![];
+    if *protocol != Protocol::Anthropic && !prompt.is_empty() {
+        result.push(json!({"role":"system","content":prompt}));
+    }
+    for message in history {
+        if message.error.is_some() && message.content.is_empty() && message.tools.is_empty() {
+            continue;
+        }
+        let mut text = message.content.clone();
+        for a in &message.attachments {
+            if let Some(content) = &a.text
+                && (a.mime != "application/pdf" || *protocol == Protocol::Ollama)
+            {
+                text.push_str(&format!(
+                    "\n\n<document name={:?}>\n{}\n</document>",
+                    a.name, content
+                ));
+            }
+        }
+        match protocol {
+            Protocol::Ollama => {
+                let mut item = json!({"role":message.role,"content":text});
+                let mut images = vec![];
+                for a in &message.attachments {
+                    if a.mime.starts_with("image/") {
+                        images.push(STANDARD.encode(std::fs::read(&a.path)?));
+                    }
+                    if a.mime == "application/pdf"
+                        && a.text.as_ref().is_none_or(|s| s.trim().is_empty())
+                    {
+                        bail!("该 PDF 没有可提取的文字；扫描件请使用支持 PDF 视觉输入的云端模型");
+                    }
+                }
+                if !images.is_empty() {
+                    item["images"] = json!(images);
+                }
+                if !message.tools.is_empty() {
+                    item["tool_calls"] = json!(message.tools.iter().map(|t| Ok(json!({"function":{"name":t.name,"arguments":serde_json::from_str::<Value>(&t.arguments)?}}))).collect::<Result<Vec<_>>>()?);
+                }
+                result.push(item);
+                for t in &message.tools {
+                    if let Some(output) = &t.result {
+                        result.push(json!({"role":"tool","tool_name":t.name,"content":output}));
+                    }
+                }
+            }
+            Protocol::OpenAi => {
+                let mut content = vec![json!({"type":"text","text":text})];
+                for a in &message.attachments {
+                    if a.mime.starts_with("image/") {
+                        content.push(json!({"type":"image_url","image_url":{"url":data_url(a)?}}));
+                    }
+                    if a.mime == "application/pdf" {
+                        content.push(json!({"type":"file","file":{"filename":a.name,"file_data":data_url(a)?}}));
+                    }
+                }
+                let mut item = json!({"role":message.role,"content":if content.len()==1 { content[0]["text"].clone() } else { json!(content) }});
+                if !message.tools.is_empty() {
+                    item["tool_calls"] = json!(message.tools.iter().map(|t| json!({"id":t.id,"type":"function","function":{"name":t.name,"arguments":t.arguments}})).collect::<Vec<_>>());
+                }
+                result.push(item);
+                for t in &message.tools {
+                    if let Some(output) = &t.result {
+                        result.push(json!({"role":"tool","tool_call_id":t.id,"content":output}));
+                    }
+                }
+            }
+            Protocol::Anthropic => {
+                let mut content = vec![];
+                if !text.is_empty() {
+                    content.push(json!({"type":"text","text":text}));
+                }
+                for a in &message.attachments {
+                    if a.text.is_some() && a.mime != "application/pdf" {
+                        continue;
+                    }
+                    content.push(json!({"type":if a.mime == "application/pdf" {"document"} else {"image"},"source":{"type":"base64","media_type":a.mime,"data":STANDARD.encode(std::fs::read(&a.path)?)}}));
+                }
+                for t in &message.tools {
+                    content.push(json!({"type":"tool_use","id":t.id,"name":t.name,"input":serde_json::from_str::<Value>(&t.arguments)?}));
+                }
+                if !content.is_empty() {
+                    result.push(json!({"role":message.role,"content":content}));
+                }
+                let tool_results: Vec<Value> = message
+                    .tools
+                    .iter()
+                    .filter_map(|t| {
+                        t.result
+                            .as_ref()
+                            .map(|r| json!({"type":"tool_result","tool_use_id":t.id,"content":r}))
+                    })
+                    .collect();
+                if !tool_results.is_empty() {
+                    result.push(json!({"role":"user","content":tool_results}));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value> {
+    let mut body = json!({"model":request.conversation.model,"messages":messages(&request.provider.protocol, history, &request.prompt)?,"stream":true});
+    match request.provider.protocol {
+        Protocol::Ollama => {
+            body["options"] = json!({"temperature":request.settings.temperature,"num_predict":request.settings.max_tokens});
+        }
+        Protocol::Anthropic => {
+            body["system"] = json!(request.prompt);
+            body["max_tokens"] = json!(request.settings.max_tokens);
+            body["temperature"] = json!(request.settings.temperature);
+            if !tools.is_empty() {
+                body["tools"] = json!(tools.iter().map(|t| json!({"name":t["function"]["name"],"description":t["function"]["description"],"input_schema":t["function"]["parameters"]})).collect::<Vec<_>>());
+            }
+        }
+        Protocol::OpenAi => {
+            body["stream_options"] = json!({"include_usage":true});
+            // OpenAI reasoning models do not accept temperature or legacy max_tokens.
+            let model = request.conversation.model.rsplit('/').next().unwrap_or("");
+            let reasoning = model.starts_with("o1")
+                || model.starts_with("o3")
+                || model.starts_with("o4")
+                || model.starts_with("gpt-5")
+                || model.starts_with("gpt-6");
+            if reasoning {
+                body["max_completion_tokens"] = json!(request.settings.max_tokens);
+            } else {
+                body["temperature"] = json!(request.settings.temperature);
+                body["max_tokens"] = json!(request.settings.max_tokens);
+            }
+        }
+    }
+    if !tools.is_empty() && request.provider.protocol != Protocol::Anthropic {
+        body["tools"] = json!(tools);
+    }
+    Ok(body)
+}
+
+#[derive(Default)]
+struct Accumulator {
+    calls: std::collections::BTreeMap<usize, ToolCall>,
+    output: String,
+    reasoning: String,
+    tokens: u64,
+    finished: bool,
+}
+impl Accumulator {
+    fn ingest(&mut self, protocol: &Protocol, value: Value) -> Result<()> {
+        if let Some(error) = value.get("error") {
+            bail!("流式请求失败：{error}");
+        }
+        match protocol {
+            Protocol::Ollama => {
+                self.output
+                    .push_str(value["message"]["content"].as_str().unwrap_or(""));
+                self.reasoning
+                    .push_str(value["message"]["thinking"].as_str().unwrap_or(""));
+                if let Some(calls) = value["message"]["tool_calls"].as_array() {
+                    for c in calls {
+                        let i = c["function"]["index"]
+                            .as_u64()
+                            .map(|v| v as usize)
+                            .unwrap_or(self.calls.len());
+                        self.calls.insert(
+                            i,
+                            ToolCall {
+                                id: id(),
+                                name: c["function"]["name"].as_str().unwrap_or("").into(),
+                                arguments: c["function"]["arguments"].to_string(),
+                                result: None,
+                            },
+                        );
+                    }
+                }
+                self.tokens = value["eval_count"].as_u64().unwrap_or(self.tokens);
+                self.finished |= value["done"] == true;
+            }
+            Protocol::OpenAi => {
+                let delta = &value["choices"][0]["delta"];
+                self.output
+                    .push_str(delta["content"].as_str().unwrap_or(""));
+                self.reasoning.push_str(
+                    delta["reasoning_content"]
+                        .as_str()
+                        .or(delta["reasoning"].as_str())
+                        .unwrap_or(""),
+                );
+                if let Some(calls) = delta["tool_calls"].as_array() {
+                    for c in calls {
+                        let call = self
+                            .calls
+                            .entry(c["index"].as_u64().unwrap_or(0) as usize)
+                            .or_default();
+                        if let Some(id) = c["id"].as_str() {
+                            call.id.push_str(id);
+                        }
+                        if let Some(name) = c["function"]["name"].as_str() {
+                            call.name.push_str(name);
+                        }
+                        if let Some(args) = c["function"]["arguments"].as_str() {
+                            call.arguments.push_str(args);
+                        }
+                    }
+                }
+                self.tokens = value["usage"]["completion_tokens"]
+                    .as_u64()
+                    .unwrap_or(self.tokens);
+                self.finished |= value["choices"][0]["finish_reason"].is_string();
+            }
+            Protocol::Anthropic => {
+                let index = value["index"].as_u64().unwrap_or(0) as usize;
+                match value["type"].as_str().unwrap_or("") {
+                    "content_block_start" => {
+                        let block = &value["content_block"];
+                        if block["type"] == "tool_use" {
+                            self.calls.insert(
+                                index,
+                                ToolCall {
+                                    id: block["id"].as_str().unwrap_or("").into(),
+                                    name: block["name"].as_str().unwrap_or("").into(),
+                                    arguments: String::new(),
+                                    result: None,
+                                },
+                            );
+                        }
+                        if block["type"] == "text" {
+                            self.output.push_str(block["text"].as_str().unwrap_or(""));
+                        }
+                    }
+                    "content_block_delta" => {
+                        let delta = &value["delta"];
+                        self.output.push_str(delta["text"].as_str().unwrap_or(""));
+                        self.reasoning
+                            .push_str(delta["thinking"].as_str().unwrap_or(""));
+                        if let Some(args) = delta["partial_json"].as_str()
+                            && let Some(call) = self.calls.get_mut(&index)
+                        {
+                            call.arguments.push_str(args);
+                        }
+                    }
+                    "message_delta" => {
+                        self.tokens = value["usage"]["output_tokens"]
+                            .as_u64()
+                            .unwrap_or(self.tokens);
+                    }
+                    "message_stop" => self.finished = true,
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+    fn apply(&self, message: &mut Message) {
+        message.content.clone_from(&self.output);
+        message.reasoning.clone_from(&self.reasoning);
+        message.tools = self
+            .calls
+            .values()
+            .cloned()
+            .map(|mut t| {
+                if t.id.is_empty() {
+                    t.id = id();
+                }
+                if t.arguments.is_empty() {
+                    t.arguments = "{}".into();
+                }
+                t
+            })
+            .collect();
+        message.tokens = self.tokens;
+    }
+}
+
+fn stream(
+    request: &Request,
+    history: &[Message],
+    tools: &[Value],
+    message: &mut Message,
+    tx: &mpsc::Sender<Event>,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let endpoint = match request.provider.protocol {
+        Protocol::Ollama => "api/chat",
+        Protocol::Anthropic => "messages",
+        Protocol::OpenAi => "chat/completions",
+    };
+    let mut req = client()?
+        .post(format!(
+            "{}/{endpoint}",
+            request.provider.base_url.trim_end_matches('/')
+        ))
+        .json(&body(request, history, tools)?);
+    if request.provider.protocol == Protocol::Anthropic {
+        req = req.header("anthropic-version", "2023-06-01");
+    }
+    let response = checked(authorize(req, &request.provider)?.send()?)?;
+    let start = Instant::now();
+    let mut accumulator = Accumulator::default();
+    let mut data = String::new();
+    for line in BufReader::new(response).lines() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let line = line?;
+        let payload = if request.provider.protocol == Protocol::Ollama {
+            if line.trim().is_empty() {
+                continue;
+            }
+            Some(line)
+        } else if line.is_empty() {
+            if data.is_empty() {
+                continue;
+            }
+            Some(std::mem::take(&mut data))
+        } else {
+            if let Some(part) = line.strip_prefix("data:") {
+                data.push_str(part.trim_start());
+                data.push('\n');
+            }
+            None
+        };
+        if let Some(payload) = payload {
+            if payload.trim() == "[DONE]" {
+                accumulator.finished = true;
+                break;
+            }
+            accumulator.ingest(
+                &request.provider.protocol,
+                serde_json::from_str(payload.trim())?,
+            )?;
+            accumulator.apply(message);
+            message.elapsed_ms = start.elapsed().as_millis() as u64;
+            if tx.send(Event::Message(message.clone())).is_err() {
+                return Ok(());
+            }
+        }
+    }
+    if !data.trim().is_empty() && data.trim() != "[DONE]" {
+        accumulator.ingest(
+            &request.provider.protocol,
+            serde_json::from_str(data.trim())?,
+        )?;
+    }
+    accumulator.apply(message);
+    message.elapsed_ms = start.elapsed().as_millis() as u64;
+    let _ = tx.send(Event::Message(message.clone()));
+    if !accumulator.finished {
+        bail!("连接在回复结束前断开；已保留收到的内容，可以重试");
+    }
+    Ok(())
+}
+
+pub fn run(request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool>) {
+    let outcome = (|| -> Result<()> {
+        let _ = tx.send(Event::Status("正在连接模型…".into()));
+        let mut registry = ToolRegistry::load(&request.settings)?;
+        let mut history = request.conversation.messages.clone();
+        for message in &mut history {
+            message.tools.retain(|t| {
+                t.result.is_some() && serde_json::from_str::<Value>(&t.arguments).is_ok()
+            });
+        }
+        for _ in 0..12 {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let mut message = Message::new("assistant", "");
+            stream(
+                &request,
+                &history,
+                &registry.schemas,
+                &mut message,
+                &tx,
+                &cancel,
+            )?;
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            if message.tools.is_empty() {
+                return Ok(());
+            }
+            for i in 0..message.tools.len() {
+                let (approval_tx, approval_rx) = mpsc::channel();
+                tx.send(Event::Approval(message.tools[i].clone(), approval_tx))?;
+                let approved = loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    match approval_rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(v) => break v,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                        Err(_) => {}
+                    }
+                };
+                let output = if approved {
+                    registry
+                        .execute(&message.tools[i], &request.settings, &cancel)
+                        .unwrap_or_else(|e| format!("工具执行失败：{e:#}"))
+                } else {
+                    "用户拒绝执行此工具。请继续回答，勿重复请求。".into()
+                };
+                message.tools[i].result = Some(output);
+                let _ = tx.send(Event::Message(message.clone()));
+            }
+            history.push(message);
+        }
+        bail!("已达到 12 轮工具调用上限，请发送新消息继续")
+    })();
+    if let Err(e) = outcome {
+        let _ = tx.send(Event::Error(format!("{e:#}")));
+    }
+    let _ = tx.send(Event::Done);
+}
+
+pub fn generate_image(
+    provider: &Provider,
+    prompt: &str,
+    model: &str,
+    store: &Store,
+) -> Result<Attachment> {
+    if provider.protocol != Protocol::OpenAi {
+        bail!("图片生成需要支持 images/generations 的 OpenAI 兼容服务商");
+    }
+    let mut body = json!({"model":model,"prompt":prompt,"n":1,"size":"1024x1024"});
+    if !model.starts_with("gpt-image") {
+        body["response_format"] = json!("b64_json");
+    }
+    let value: Value = checked(
+        authorize(
+            client()?
+                .post(format!(
+                    "{}/images/generations",
+                    provider.base_url.trim_end_matches('/')
+                ))
+                .json(&body),
+            provider,
+        )?
+        .send()?,
+    )?
+    .json()?;
+    let data = if let Some(data) = value["data"][0]["b64_json"].as_str() {
+        STANDARD.decode(data)?
+    } else if let Some(url) = value["data"][0]["url"].as_str() {
+        checked(client()?.get(url).send()?)?.bytes()?.to_vec()
+    } else {
+        bail!("图片响应中没有图像数据：{value}");
+    };
+    let path = store.save_media(&data, "png")?;
+    Ok(Attachment {
+        name: "生成的图片.png".into(),
+        path: path.to_string_lossy().into(),
+        mime: "image/png".into(),
+        text: None,
+    })
+}
+pub fn transcribe(provider: &Provider, path: &std::path::Path, model: &str) -> Result<String> {
+    if provider.protocol != Protocol::OpenAi {
+        bail!("音频转写需要支持 audio/transcriptions 的 OpenAI 兼容服务商");
+    }
+    let form = reqwest::blocking::multipart::Form::new()
+        .text("model", model.to_string())
+        .file("file", path)?;
+    let response: Value = checked(
+        authorize(
+            client()?
+                .post(format!(
+                    "{}/audio/transcriptions",
+                    provider.base_url.trim_end_matches('/')
+                ))
+                .multipart(form),
+            provider,
+        )?
+        .send()?,
+    )?
+    .json()?;
+    Ok(response["text"]
+        .as_str()
+        .context("转写响应缺少 text")?
+        .into())
+}
+pub fn speak(
+    provider: &Provider,
+    text: &str,
+    model: &str,
+    store: &Store,
+) -> Result<std::path::PathBuf> {
+    if provider.protocol != Protocol::OpenAi {
+        bail!("朗读需要支持 audio/speech 的 OpenAI 兼容服务商");
+    }
+    let response = checked(
+        authorize(
+            client()?
+                .post(format!(
+                    "{}/audio/speech",
+                    provider.base_url.trim_end_matches('/')
+                ))
+                .json(&json!({"model":model,"input":text,"voice":"alloy","response_format":"mp3"})),
+            provider,
+        )?
+        .send()?,
+    )?;
+    store.save_media(&response.bytes()?, "mp3")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{Response, server};
+    fn request(protocol: Protocol, base_url: String) -> Request {
+        let provider = Provider {
+            id: id(),
+            name: "Fixture".into(),
+            protocol,
+            base_url,
+            models: vec!["fixture".into()],
+            enabled: true,
+        };
+        let mut conversation =
+            Conversation::new(provider.id.clone(), "fixture".into(), "general".into());
+        conversation.messages.push(Message::new("user", "你好"));
+        Request {
+            provider,
+            conversation,
+            prompt: "Be helpful".into(),
+            settings: Settings::default(),
+        }
+    }
+    #[test]
+    fn full_http_streams_for_all_three_protocols() {
+        for protocol in [Protocol::OpenAi, Protocol::Ollama, Protocol::Anthropic] {
+            let response = match protocol {
+                Protocol::OpenAi => Response::sse(&[
+                    json!({"choices":[{"delta":{"content":"你好，世界"}}]}),
+                    json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":4}}),
+                ]),
+                Protocol::Ollama => Response {
+                    content_type: "application/x-ndjson",
+                    body: format!(
+                        "{}\n{}\n",
+                        json!({"message":{"content":"你好，"},"done":false}),
+                        json!({"message":{"content":"世界"},"done":true,"eval_count":4})
+                    ),
+                    extra_headers: String::new(),
+                },
+                Protocol::Anthropic => Response::sse(&[
+                    json!({"type":"content_block_delta","index":0,"delta":{"text":"你好，世界"}}),
+                    json!({"type":"message_delta","usage":{"output_tokens":4}}),
+                    json!({"type":"message_stop"}),
+                ]),
+            };
+            let (url, requests, handle) = server(vec![response]);
+            let req = request(protocol.clone(), url);
+            let (tx, rx) = mpsc::channel();
+            run(req, tx, Arc::new(AtomicBool::new(false)));
+            let events: Vec<_> = rx.try_iter().collect();
+            assert!(!events.iter().any(|e| matches!(e, Event::Error(_))));
+            let last = events
+                .iter()
+                .filter_map(|e| {
+                    if let Event::Message(m) = e {
+                        Some(m)
+                    } else {
+                        None
+                    }
+                })
+                .next_back()
+                .unwrap();
+            assert_eq!(last.content, "你好，世界");
+            assert_eq!(last.tokens, 4);
+            let (header, body) = requests.recv().unwrap();
+            assert!(header.contains(match protocol {
+                Protocol::OpenAi => "/chat/completions",
+                Protocol::Ollama => "/api/chat",
+                Protocol::Anthropic => "/messages",
+            }));
+            assert_eq!(body["stream"], true);
+            handle.join().unwrap();
+        }
+    }
+    #[test]
+    fn denied_tool_is_returned_to_model_before_followup() {
+        let (url, requests, handle) = server(vec![
+            Response::sse(&[
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"bash","arguments":"{\"command\":\"echo hello\"}"}}]},"finish_reason":"tool_calls"}]}),
+            ]),
+            Response::sse(&[
+                json!({"choices":[{"delta":{"content":"无需执行工具也可以继续。"},"finish_reason":"stop"}]}),
+            ]),
+        ]);
+        let mut req = request(Protocol::OpenAi, url);
+        req.settings.tools_enabled = true;
+        req.settings.bash_enabled = true;
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || run(req, tx, Arc::new(AtomicBool::new(false))));
+        let mut saw_approval = false;
+        let mut final_text = String::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                Event::Approval(call, tx) => {
+                    assert_eq!(call.name, "bash");
+                    saw_approval = true;
+                    tx.send(false).unwrap();
+                }
+                Event::Error(e) => panic!("{e}"),
+                Event::Message(m) => final_text = m.content,
+                Event::Done => break,
+                _ => {}
+            }
+        }
+        assert!(saw_approval);
+        assert_eq!(final_text, "无需执行工具也可以继续。");
+        let _ = requests.recv().unwrap();
+        let (_, body) = requests.recv().unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.last().unwrap()["role"], "tool");
+        assert!(
+            msgs.last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .contains("拒绝")
+        );
+        worker.join().unwrap();
+        handle.join().unwrap();
+    }
+    #[test]
+    fn truncated_stream_returns_error_instead_of_silent_success() {
+        let (url, _requests, handle) = server(vec![Response {
+            content_type: "text/event-stream",
+            body: format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{"content":"partial"}}]})
+            ),
+            extra_headers: String::new(),
+        }]);
+        let (tx, rx) = mpsc::channel();
+        run(
+            request(Protocol::OpenAi, url),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(rx.try_iter().any(|e| matches!(e, Event::Error(_))));
+        handle.join().unwrap();
+    }
+    #[test]
+    fn openai_fragmented_tools_and_reasoning() {
+        let mut a = Accumulator::default();
+        a.ingest(&Protocol::OpenAi, json!({"choices":[{"delta":{"reasoning_content":"think","tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"com"}}]}}]})).unwrap();
+        a.ingest(&Protocol::OpenAi, json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"mand\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10}})).unwrap();
+        assert_eq!(a.calls[&0].arguments, "{\"command\":\"pwd\"}");
+        assert_eq!(a.reasoning, "think");
+        assert!(a.finished);
+    }
+    #[test]
+    fn tool_results_keep_protocol_order() {
+        let mut m = Message::new("assistant", "");
+        m.tools.push(ToolCall {
+            id: "call_1".into(),
+            name: "lookup".into(),
+            arguments: "{}".into(),
+            result: Some("found".into()),
+        });
+        let openai = messages(&Protocol::OpenAi, &[m.clone()], "system").unwrap();
+        assert_eq!(openai[2]["tool_call_id"], "call_1");
+        let claude = messages(&Protocol::Anthropic, &[m], "system").unwrap();
+        assert_eq!(claude[1]["content"][0]["tool_use_id"], "call_1");
+    }
+    #[test]
+    fn ollama_and_claude_streams() {
+        let mut a = Accumulator::default();
+        a.ingest(
+            &Protocol::Ollama,
+            json!({"message":{"content":"你好","thinking":"思考"},"done":true,"eval_count":2}),
+        )
+        .unwrap();
+        assert_eq!(a.output, "你好");
+        assert!(a.finished);
+        let mut a = Accumulator::default();
+        a.ingest(&Protocol::Anthropic, json!({"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"t","name":"lookup"}})).unwrap();
+        a.ingest(&Protocol::Anthropic, json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}})).unwrap();
+        assert_eq!(a.calls[&2].arguments, "{}");
+    }
+}

@@ -1,0 +1,25 @@
+1 ICON "mori.ico"
+
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "Mori AI Chat Client\0"
+      VALUE "ProductName", "Mori\0"
+      VALUE "FileVersion", "0.1.0\0"
+      VALUE "ProductVersion", "0.1.0\0"
+      VALUE "OriginalFilename", "Mori.exe\0"
+      VALUE "LegalCopyright", "Mori contributors. MIT License.\0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

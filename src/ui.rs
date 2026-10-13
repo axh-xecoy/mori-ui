@@ -45,6 +45,7 @@ enum Page {
     Tools,
     Settings,
 }
+const DELETED_NOTICE: &str = "会话已删除。可以撤销这次操作。";
 enum Work {
     Models(String, anyhow::Result<Vec<String>>),
     Transcription(anyhow::Result<String>),
@@ -578,7 +579,7 @@ impl Mori {
                     .update(cx, |s, cx| s.set_value(draft, window, cx));
                 self.rename = false;
             }
-            self.toast = Some("会话已删除。可以撤销这次操作。".into());
+            self.toast = Some(DELETED_NOTICE.into());
             self.persist();
             cx.notify();
         }
@@ -591,6 +592,9 @@ impl Mori {
             self.toast = Some("会话已恢复".into());
         }
         cx.notify();
+    }
+    fn show_undo_delete(&self) -> bool {
+        self.last_deleted.is_some() && self.toast.as_deref() == Some(DELETED_NOTICE)
     }
     fn navigate(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.stash_draft(cx);
@@ -618,11 +622,13 @@ impl Mori {
             .update(cx, |s, cx| s.set_value(models, window, cx));
         cx.notify();
     }
-    fn save_provider(&mut self, cx: &mut Context<Self>) -> bool {
+    fn save_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let name = self.provider_name.read(cx).value().to_string();
         let url = self.provider_url.read(cx).value().to_string();
         let key = self.provider_key.read(cx).value().to_string();
-        if name.trim().is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+        if name.trim().is_empty()
+            || !(url.trim().starts_with("https://") || url.trim().starts_with("http://"))
+        {
             self.toast = Some("请填写名称和有效的 HTTP / HTTPS 地址".into());
             cx.notify();
             return false;
@@ -636,7 +642,8 @@ impl Mori {
             return false;
         }
         p.name = name.trim().into();
-        p.base_url = url.trim().trim_end_matches('/').into();
+        p.base_url = provider::normalize_base_url(&p.protocol, &url);
+        let normalized = p.base_url.clone();
         p.models = self
             .provider_models
             .read(cx)
@@ -647,8 +654,20 @@ impl Mori {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect();
-        self.persist();
-        self.toast = Some("服务商设置已保存".into());
+        if let Some(store) = &self.store
+            && let Err(e) = store.save(&self.library)
+        {
+            self.toast = Some(format!("保存服务商失败：{e:#}"));
+            cx.notify();
+            return false;
+        }
+        self.toast = Some(if normalized != url.trim().trim_end_matches('/') {
+            "配置已保存，Ollama 原生协议地址已移除 /v1 或 /api 后缀；尚未测试连接".into()
+        } else {
+            "服务商配置已保存；尚未测试连接".into()
+        });
+        self.provider_url
+            .update(cx, |s, cx| s.set_value(normalized, window, cx));
         cx.notify();
         true
     }

@@ -426,9 +426,10 @@ impl Mori {
                                             .text_sm()
                                             .text_color(rgb(p.muted))
                                             .child(
-                                                TextView::markdown(
+                                                crate::math::markdown(
                                                     format!("thinking-{}", m.id),
                                                     m.reasoning.clone(),
+                                                    p.muted,
                                                 )
                                                 .selectable(true),
                                             ),
@@ -438,7 +439,7 @@ impl Mori {
                     })
                     .when(!m.content.is_empty(), |d| {
                         d.child(
-                            TextView::markdown(format!("md-{}", m.id), m.content.clone())
+                            crate::math::markdown(format!("md-{}", m.id), &m.content, p.ink)
                                 .selectable(true)
                                 .w_full(),
                         )
@@ -1206,9 +1207,9 @@ impl Mori {
         .child(div().flex().flex_wrap().gap_2().children(self.library.providers.iter().enumerate().map(|(i,provider)|button(format!("provider-{}",provider.id),provider.name.clone(),if provider.protocol==Protocol::Ollama{"hard-drive"}else{"cloud"}).when(i==self.selected_provider,|b|b.bg(rgb(p.soft)).text_color(rgb(p.accent))).on_click(cx.listener(move|this,_,w,cx|this.load_provider(i,w,cx)))))
             .child(tiny("add-provider","plus","添加兼容服务商").on_click(cx.listener(|this,_,w,cx|{this.library.providers.push(Provider{id:id(),name:"自定义服务商".into(),protocol:Protocol::OpenAi,base_url:"https://api.example.com/v1".into(),models:vec![],enabled:true});this.load_provider(this.library.providers.len()-1,w,cx);this.persist();}))))
         .child(card(p).max_w(px(896.)).child(div().flex().gap_4().child(field("服务商名称",Input::new(&self.provider_name),p).flex_1()).child(field("接口协议",button("protocol",format!("{:?}",protocol),"chevrons-up-down").on_click(cx.listener(|this,_,_,cx|{let p=&mut this.library.providers[this.selected_provider];p.protocol=match p.protocol{Protocol::OpenAi=>Protocol::Ollama,Protocol::Ollama=>Protocol::Anthropic,Protocol::Anthropic=>Protocol::OpenAi};cx.notify();})),p).w(px(200.))))
-            .child(field("API 地址（含 /v1 等服务商前缀）",Input::new(&self.provider_url),p)).child(field("API Key",Input::new(&self.provider_key),p)).child(field("模型 ID（可手动填写，每行一个）",Textarea::new(&self.provider_models),p))
-            .child(div().flex().flex_wrap().gap_2().child(Button::new("save-provider").primary().label("保存连接").on_click(cx.listener(|this,_,_,cx|{this.save_provider(cx);})))
-                .child(button("fetch-models","连接并获取模型","refresh-cw").on_click(cx.listener(|this,_,_,cx|{if this.save_provider(cx){let p=this.library.providers[this.selected_provider].clone();let tx=this.work_tx.clone();this.toast=Some("正在获取模型列表…".into());std::thread::spawn(move||{let result=provider::models(&p);let _=tx.send(Work::Models(p.id,result));});}})))
+            .child(field(if protocol==Protocol::Ollama {"API 地址（Ollama 原生：如 http://localhost:11434，无需 /v1）"}else{"API 地址（含 /v1 等服务商前缀）"},Input::new(&self.provider_url),p)).child(field("API Key",Input::new(&self.provider_key),p)).child(field("模型 ID（可手动填写，每行一个）",Textarea::new(&self.provider_models),p))
+            .child(div().flex().flex_wrap().gap_2().child(Button::new("save-provider").primary().label("保存配置").on_click(cx.listener(|this,_,w,cx|{this.save_provider(w,cx);})))
+                .child(button("fetch-models","连接并获取模型","refresh-cw").on_click(cx.listener(|this,_,w,cx|{if this.save_provider(w,cx){let p=this.library.providers[this.selected_provider].clone();let tx=this.work_tx.clone();this.toast=Some("正在获取模型列表…".into());std::thread::spawn(move||{let result=provider::models(&p);let _=tx.send(Work::Models(p.id,result));});}})))
                 .child(button("provider-enabled",if provider.enabled{"已启用"}else{"已停用"},"power").on_click(cx.listener(|this,_,_,cx|{let p=&mut this.library.providers[this.selected_provider];p.enabled= !p.enabled;this.persist();cx.notify();})))
                 .child(button("clear-key","移除已保存的密钥","key-round").on_click(cx.listener(|this,_,_,cx|{let p=&this.library.providers[this.selected_provider];this.toast=Some(match storage::set_api_key(p,""){Ok(_)=>"已移除系统凭据库中的密钥".into(),Err(e)=>format!("{e:#}")});cx.notify();}))))
             .child(label("模型能力由服务商和所选模型决定；视觉、PDF、工具、图片生成与语音接口需对应支持。",p.muted)))
@@ -1292,7 +1293,7 @@ impl Render for Mori {
                                 .border_b_1()
                                 .border_color(rgb(p.line))
                                 .child(div().text_sm().flex_1().child(text))
-                                .when(self.last_deleted.is_some(), |d| {
+                                .when(self.show_undo_delete(), |d| {
                                     d.child(button("undo-delete", "撤销删除", "undo-2").on_click(
                                         cx.listener(|this, _, w, cx| {
                                             this.undo_delete(w, cx);

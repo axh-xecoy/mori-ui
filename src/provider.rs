@@ -38,6 +38,18 @@ fn client() -> Result<Client> {
         .timeout(Duration::from_secs(180))
         .build()?)
 }
+pub fn normalize_base_url(protocol: &Protocol, url: &str) -> String {
+    let base = url.trim().trim_end_matches('/');
+    if *protocol == Protocol::Ollama {
+        // Native Ollama uses /api endpoints; /v1 belongs to its OpenAI adapter.
+        base.strip_suffix("/v1")
+            .or_else(|| base.strip_suffix("/api"))
+            .unwrap_or(base)
+            .to_string()
+    } else {
+        base.to_string()
+    }
+}
 fn authorize(request: RequestBuilder, provider: &Provider) -> Result<RequestBuilder> {
     let key = api_key(provider)?;
     Ok(if key.is_empty() {
@@ -71,7 +83,7 @@ pub fn models(provider: &Provider) -> Result<Vec<String>> {
         authorize(
             client()?.get(format!(
                 "{}/{endpoint}",
-                provider.base_url.trim_end_matches('/')
+                normalize_base_url(&provider.protocol, &provider.base_url)
             )),
             provider,
         )?
@@ -393,7 +405,7 @@ fn stream(
     let mut req = client()?
         .post(format!(
             "{}/{endpoint}",
-            request.provider.base_url.trim_end_matches('/')
+            normalize_base_url(&request.provider.protocol, &request.provider.base_url)
         ))
         .json(&body(request, history, tools)?);
     if request.provider.protocol == Protocol::Anthropic {
@@ -680,6 +692,52 @@ mod tests {
                 Protocol::Anthropic => "/messages",
             }));
             assert_eq!(body["stream"], true);
+            handle.join().unwrap();
+        }
+    }
+    #[test]
+    fn ollama_native_base_urls_keep_proxy_prefixes_and_openai_is_unchanged() {
+        for input in [
+            "http://localhost:11434",
+            "http://localhost:11434/v1/",
+            " http://localhost:11434/api/ ",
+        ] {
+            assert_eq!(
+                normalize_base_url(&Protocol::Ollama, input),
+                "http://localhost:11434"
+            );
+        }
+        assert_eq!(
+            normalize_base_url(&Protocol::Ollama, "https://example.com/proxy/ollama/api"),
+            "https://example.com/proxy/ollama"
+        );
+        assert_eq!(
+            normalize_base_url(&Protocol::OpenAi, "http://localhost:11434/v1/"),
+            "http://localhost:11434/v1"
+        );
+    }
+    #[test]
+    fn ollama_legacy_v1_and_api_addresses_use_native_models_and_chat_paths() {
+        use crate::test_support::{Response, server};
+        for suffix in ["/v1/", "/api/"] {
+            let (url, requests, handle) = server(vec![
+                Response::json(json!({"models":[{"name":"local-model"}]})),
+                Response {
+                    content_type: "application/x-ndjson",
+                    body: format!(
+                        "{}\n",
+                        json!({"message":{"content":"正常回复"},"done":true})
+                    ),
+                    extra_headers: String::new(),
+                },
+            ]);
+            let req = request(Protocol::Ollama, format!("{url}{suffix}"));
+            assert_eq!(models(&req.provider).unwrap(), vec!["local-model"]);
+            let (tx, rx) = mpsc::channel();
+            run(req, tx, Arc::new(AtomicBool::new(false)));
+            assert!(!rx.try_iter().any(|e| matches!(e, Event::Error(_))));
+            assert!(requests.recv().unwrap().0.starts_with("GET /api/tags "));
+            assert!(requests.recv().unwrap().0.starts_with("POST /api/chat "));
             handle.join().unwrap();
         }
     }

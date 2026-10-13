@@ -13,7 +13,7 @@ pub fn start(
         this.library.active_id = None;
     });
     cx.spawn(async move |cx| {
-        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored"].into_iter().enumerate() {
+        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact"].into_iter().enumerate() {
             let _ = handle.update(cx, |_, window, cx| {
                 view.update(cx, |this, cx| {
                     this.page = Page::Chat; this.model_picker = false; this.library.settings.dark = false;
@@ -32,7 +32,7 @@ pub fn start(
                             this.title_input.update(cx,|s,cx|s.set_value("周末的灵感",window,cx));
                             this.commit_title(window,cx);
                             assert_eq!(this.library.conversations[0].title,"周末的灵感");
-                            let id=this.library.conversations[0].id.clone(); this.delete_conversation(&id,window,cx); assert!(this.library.conversations.is_empty());
+                            let id=this.library.conversations[0].id.clone(); this.delete_conversation(&id,window,cx); assert!(this.library.conversations.is_empty()); assert!(this.show_undo_delete());
                         },
                         10 => {
                             this.undo_delete(window,cx); assert_eq!(this.library.conversations.len(),1);
@@ -51,7 +51,33 @@ pub fn start(
                             this.select_chat(original,window,cx);
                             assert_eq!(this.attachments.len(),1,"Original conversation restores its imported attachment");
                             this.attachments.clear(); this.stash_draft(cx); this.toast=None;
-                        }, _ => {}
+                        },
+                        11 => {
+                            let id=this.library.active_id.clone().unwrap(); this.delete_conversation(&id,window,cx);
+                            assert!(this.show_undo_delete());
+                            this.load_provider(0,window,cx);
+                            this.provider_url.update(cx,|s,cx|s.set_value("http://localhost:11434/v1",window,cx));
+                            assert!(this.save_provider(window,cx));
+                            assert!(this.last_deleted.is_some()); assert!(!this.show_undo_delete(),"Save provider notices must not show an unrelated undo action");
+                            assert_eq!(this.provider_url.read(cx).value().as_ref(),"http://localhost:11434");
+                            assert_eq!(this.library.providers[0].base_url,"http://localhost:11434");
+                            this.page=Page::Settings;
+                        },
+                        12 => {
+                            this.new_chat(window,cx); this.toast=None;
+                            let content=r"### 体积与高度
+我们需要找出 $V_{\text{水2}}$ 中圆锥与圆柱的体积。
+
+圆锥剩余部分：$$V_{\text{锥剩}}=V_{\text{锥总}}-\frac{1}{8}V_{\text{锥总}}=\frac{7}{8}V_{\text{锥总}}$$
+圆柱体积：$$V_{\text{柱}}=\frac{30}{8}V_{\text{锥总}}-\frac{7}{8}V_{\text{锥总}}=\frac{23}{8}V_{\text{锥总}}$$
+代入 $V_{\text{锥总}}=4\pi r^2$：$$\pi r^2 h_{\text{柱}}=\frac{23}{8}\times4\pi r^2$$
+所以 $h_{\text{柱}}=11.5\text{ 厘米}$。
+
+代码中的 `$$x^2$$` 保持原样。";
+                            let c=this.current_mut().unwrap(); c.title="数学公式".into(); c.messages.push(Message::new("assistant",content));
+                        },
+                        13 => this.library.settings.dark=true,
+                        14 => window.resize(size(px(900.),px(640.))), _ => {}
                     }
                     Theme::change(if this.library.settings.dark {ThemeMode::Dark} else {ThemeMode::Light},Some(window),cx);
                     Mori::tint(cx,this.library.settings.dark); cx.notify();

@@ -385,29 +385,30 @@ impl Mori {
                             .rounded_xl()
                             .bg(rgb(p.soft))
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .when(user, |d| d.justify_end())
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(tr(if user { "你" } else { "Mori" })),
-                            )
-                            .when(!user && m.elapsed_ms > 0, |d| {
-                                d.child(label(
-                                    format!(
-                                        "{:.1}s · {} tokens",
-                                        m.elapsed_ms as f64 / 1000.,
-                                        m.tokens
-                                    ),
-                                    p.muted,
-                                ))
-                            }),
-                    )
+                    .when(!user, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child("Mori"),
+                                )
+                                .when(!user && m.elapsed_ms > 0, |d| {
+                                    d.child(label(
+                                        format!(
+                                            "{:.1}s · {} tokens",
+                                            m.elapsed_ms as f64 / 1000.,
+                                            m.tokens
+                                        ),
+                                        p.muted,
+                                    ))
+                                }),
+                        )
+                    })
                     .when(!m.reasoning.is_empty(), |d| {
                         d.child(
                             div()
@@ -1365,7 +1366,6 @@ impl Render for Mori {
                         .h_full()
                         .flex_shrink_0()
                         .cursor(CursorStyle::ResizeLeftRight)
-                        .hover(|style| style.bg(rgb(p.accent)))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {

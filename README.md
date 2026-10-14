@@ -37,6 +37,8 @@ Ollama 原生协议填写服务器根地址（例如 `http://localhost:11434`）
 
 会话库与附件位于操作系统的应用数据目录。在 Windows 上通常为 `%LOCALAPPDATA%/mori/Mori/data`；以设置中的「打开数据目录」为准。`library.json` 通过临时文件替换保存，保留上一版 `library.backup.json`。加载损坏的会话库时禁用覆盖保存，原文件保留。
 
+偏好独立保存到同目录的 `preferences.json`，优先于会话库中的设置。旧安装首次保存时自动沿用原设置；只更新当前实例修改过的偏好，保留未知偏好字段。保存通过文件锁与原子替换完成，旧版本退出时重写会话库不会重置已独立保存的偏好。
+
 API Key 保存到系统凭据库，不写入会话 JSON。可用服务商 ID 对应的环境变量覆盖，例如 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`、`QWEN_API_KEY`、`SILICONFLOW_API_KEY`、`OPENROUTER_API_KEY`。自定义服务商以设置中的内部 UUID 为 ID。
 
 `MORI_DATA_DIR` 可以指定独立的数据目录，适合测试。JSON 导出包含配置与会话，但图片等二进制附件仍通过本地路径引用；完整迁移应同时复制数据目录。MCP 自定义环境变量保存在本地配置，导出时也会包含它们，因此不建议在其中放入长期凭据。
@@ -65,7 +67,7 @@ API Key 保存到系统凭据库，不写入会话 JSON。可用服务商 ID 对
 }
 ```
 
-未填写的设置使用默认值。自定义函数的结构为 `name`、`description`、`parameters`（JSON Schema）、`command`、`args`、`enabled`。参数 JSON 通过 stdin 交给指定程序，stdout / stderr 返回模型。Bash 和函数程序不在沙箱中运行；实际执行前会显示参数并请求确认。每次生成最多 12 轮工具调用，函数 / Bash 单次执行最多 60 秒。
+未填写的设置保留当前值。高级编辑器不包含语言、发送方式、主题和侧栏宽度，避免扩展配置覆盖界面偏好。自定义函数的结构为 `name`、`description`、`parameters`（JSON Schema）、`command`、`args`、`enabled`。参数 JSON 通过 stdin 交给指定程序，stdout / stderr 返回模型。Bash 和函数程序不在沙箱中运行；实际执行前会显示参数并请求确认。每次生成最多 12 轮工具调用，函数 / Bash 单次执行最多 60 秒。
 
 ## 能力范围
 
@@ -85,7 +87,7 @@ cargo fmt --check
 
 测试使用本地 HTTP 模拟服务，覆盖三种服务商协议的完整流式请求、跨网络块的 UTF-8 / SSE、工具拒绝后的继续回复、异常断流、MCP 初始化 / 工具发现 / 执行 / 会话头、本地保存与备份。不会调用真实付费服务。
 
-界面验证使用 GPUI 自身的 `render_to_image`，不是网页仿制效果图。运行下列命令将输出 23 个实际界面状态，并自动检查重命名、删除、恢复、保存服务商提示、数学公式、设置分页、英文、小窗口、图片附件预览，以及输入框的 Enter / Ctrl+Enter / Shift+Enter 动作分发和侧栏鼠标拖动：
+界面验证使用 GPUI 自身的 `render_to_image`，不是网页仿制效果图。运行下列命令将输出 44 个实际界面状态，并自动检查重命名、删除、恢复、保存服务商提示、数学公式、设置分页、英文、小窗口、图片附件预览，以及输入框的 Enter / Ctrl+Enter / Shift+Enter 动作分发和侧栏鼠标拖动：
 
 ```powershell
 $env:MORI_DATA_DIR = "$PWD/.mori-visual"

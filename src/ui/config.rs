@@ -283,9 +283,11 @@ impl Mori {
             .when(self.show_advanced, |d| d.child(card(p).child(label("可配置 Bash 路径、MCP 环境变量与自定义函数。", p.muted))
                 .child(Textarea::new(&self.advanced).font_family("Cascadia Code").text_sm())
                 .child(Button::new("save-advanced").primary().label(tr("验证并保存")).on_click(cx.listener(|this, _, w, cx| {
-                    match serde_json::from_str::<Settings>(&this.advanced.read(cx).value()) {
+                    match this.library.settings.patched(&this.advanced.read(cx).value()) {
                         Ok(s) if s.temperature.is_finite() && (0.0..=2.0).contains(&s.temperature) && s.max_tokens > 0 => {
                             this.library.settings = s;
+                            this.composer.update(cx, |s,cx| s.set_submit_on_enter(this.library.settings.send_on_enter,cx));
+                            let language=this.library.settings.language.clone();this.set_language(&language,w,cx);
                             Theme::change(if this.library.settings.dark { ThemeMode::Dark } else { ThemeMode::Light }, Some(w), cx); Self::tint(cx, this.library.settings.dark);
                             this.temperature.update(cx, |s,cx| s.set_value(this.library.settings.temperature.to_string(),w,cx));
                             this.max_tokens.update(cx, |s,cx| s.set_value(this.library.settings.max_tokens.to_string(),w,cx));

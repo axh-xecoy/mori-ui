@@ -625,37 +625,69 @@ impl Mori {
                                         .w_full(),
                                 )
                             })
-                            .children(m.attachments.iter().map(|a| {
+                            .children(m.attachments.iter().enumerate().map(|(i, a)| {
                                 let path = a.path.clone();
+                                let file_path = path.clone();
                                 let is_image = a.mime.starts_with("image/");
                                 div()
+                                    .id(format!("attachment-{}-{i}", m.id))
                                     .flex()
                                     .flex_col()
                                     .gap_2()
                                     .when(is_image, |d| {
+                                        let (width, height) = image_preview_size(&path);
                                         d.child(
-                                            img(std::path::PathBuf::from(&a.path))
-                                                .max_w(px(540.))
-                                                .h(px(280.))
-                                                .object_fit(ObjectFit::Contain)
-                                                .rounded_lg(),
+                                            div()
+                                                .id(format!("attachment-image-{}-{i}", m.id))
+                                                .relative()
+                                                .w(px(width))
+                                                .h(px(height))
+                                                .cursor_pointer()
+                                                .on_click(move |_, _, cx| {
+                                                    cx.open_url(&format!(
+                                                        "file:///{}",
+                                                        path.replace('\\', "/")
+                                                    ))
+                                                })
+                                                .child(
+                                                    img(std::path::PathBuf::from(&a.path))
+                                                        .w_full()
+                                                        .h_full()
+                                                        .object_fit(ObjectFit::Contain)
+                                                        .rounded_lg(),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .top_2()
+                                                        .right_2()
+                                                        .p_1()
+                                                        .rounded_md()
+                                                        .bg(rgb(p.card))
+                                                        .child(
+                                                            icon("maximize-2")
+                                                                .text_color(rgb(p.ink)),
+                                                        ),
+                                                ),
                                         )
                                     })
-                                    .child(
-                                        button(
-                                            format!("attachment-{}-{}", m.id, a.name),
-                                            a.name.clone(),
-                                            if is_image { "image" } else { "file-text" },
+                                    .when(!is_image, |d| {
+                                        d.child(
+                                            button(
+                                                format!("attachment-file-{}-{i}", m.id),
+                                                a.name.clone(),
+                                                "file-text",
+                                            )
+                                            .on_click(
+                                                move |_, _, cx| {
+                                                    cx.open_url(&format!(
+                                                        "file:///{}",
+                                                        file_path.replace('\\', "/")
+                                                    ))
+                                                },
+                                            ),
                                         )
-                                        .on_click(
-                                            move |_, _, cx| {
-                                                cx.open_url(&format!(
-                                                    "file:///{}",
-                                                    path.replace('\\', "/")
-                                                ))
-                                            },
-                                        ),
-                                    )
+                                    })
                             }))
                             .children(m.tools.iter().map(|t| {
                                 let key = format!("tool-{}-{}", m.id, t.id);
@@ -1072,7 +1104,6 @@ impl Mori {
                                                         )),
                                                     ),
                                             )
-                                            .child(label(a.name.clone(), p.muted).truncate())
                                             .into_any_element()
                                     } else {
                                         button(format!("pending-{i}"), a.name.clone(), "file-text")

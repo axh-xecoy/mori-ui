@@ -16,6 +16,28 @@ fn mori_logo() -> std::sync::Arc<gpui_kit::Image> {
     })
     .clone()
 }
+fn image_preview_size(path: &str) -> (f32, f32) {
+    static SIZES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (f32, f32)>>,
+    > = std::sync::OnceLock::new();
+    let mut sizes = SIZES.get_or_init(Default::default).lock().unwrap();
+    if let Some(size) = sizes.get(path) {
+        return *size;
+    }
+    let size = image::image_dimensions(path)
+        .ok()
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .map(|(w, h)| {
+            let scale = (540. / w as f32).min(280. / h as f32).min(1.);
+            (w as f32 * scale, h as f32 * scale)
+        })
+        .unwrap_or((280., 280.));
+    if sizes.len() >= 256 {
+        sizes.clear();
+    }
+    sizes.insert(path.into(), size);
+    size
+}
 use gpui_kit::component::{
     Disableable, Icon, Sizable, Theme, ThemeMode,
     button::{Button, ButtonVariants},
@@ -706,7 +728,11 @@ impl Mori {
         cx.notify();
     }
     fn load_advanced(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let json = serde_json::to_string_pretty(&self.library.settings).unwrap_or_default();
+        let mut value = serde_json::to_value(&self.library.settings).unwrap();
+        for key in ["send_on_enter", "language", "sidebar_width", "dark"] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let json = serde_json::to_string_pretty(&value).unwrap_or_default();
         self.advanced
             .update(cx, |s, cx| s.set_value(json, window, cx));
     }

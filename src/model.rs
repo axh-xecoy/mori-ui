@@ -291,6 +291,17 @@ impl Default for Settings {
         }
     }
 }
+impl Settings {
+    pub fn patched(&self, json: &str) -> anyhow::Result<Self> {
+        let patch: serde_json::Value = serde_json::from_str(json)?;
+        let fields = patch
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("设置必须是 JSON 对象"))?;
+        let mut merged = serde_json::to_value(self)?;
+        merged.as_object_mut().unwrap().extend(fields.clone());
+        Ok(serde_json::from_value(merged)?)
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(default)]

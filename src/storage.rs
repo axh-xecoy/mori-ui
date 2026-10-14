@@ -28,8 +28,17 @@ fn image_fingerprint(decoded: &image::DynamicImage) -> u64 {
 
 pub struct Store {
     pub root: PathBuf,
+    settings_snapshot: std::sync::Mutex<serde_json::Value>,
 }
 impl Store {
+    fn at(root: PathBuf) -> Self {
+        Self {
+            root,
+            settings_snapshot: std::sync::Mutex::new(
+                serde_json::to_value(Settings::default()).expect("serialize preferences"),
+            ),
+        }
+    }
     pub fn new() -> Result<Self> {
         let root = if let Some(p) = std::env::var_os("MORI_DATA_DIR") {
             PathBuf::from(p)
@@ -40,24 +49,66 @@ impl Store {
                 .to_path_buf()
         };
         std::fs::create_dir_all(root.join("attachments"))?;
-        Ok(Self { root })
+        Ok(Self::at(root))
     }
     pub fn load(&self) -> Result<Library> {
         let path = self.root.join("library.json");
-        if !path.exists() {
-            return Ok(Library::default());
+        let mut value = if path.exists() {
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(path)?)
+                .context("会话库无法读取；原文件已保留，请检查 library.json")?
+        } else {
+            serde_json::to_value(Library::default())?
+        };
+        let preferences = self.root.join("preferences.json");
+        if preferences.exists() {
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(preferences)?)
+                .context("偏好文件无法读取；原文件已保留")?;
+            let fields = saved.as_object().context("偏好文件必须是 JSON 对象")?;
+            if !value["settings"].is_object() {
+                value["settings"] = serde_json::json!({});
+            }
+            value["settings"]
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.clone());
         }
-        serde_json::from_slice(&std::fs::read(path)?)
-            .context("会话库无法读取；原文件已保留，请检查 library.json")
+        let library: Library = serde_json::from_value(value)?;
+        *self.settings_snapshot.lock().unwrap() = serde_json::to_value(&library.settings)?;
+        Ok(library)
     }
     pub fn save(&self, library: &Library) -> Result<()> {
+        // Keep preferences independent from older binaries' whole-library writes.
+        // Only fields edited in this instance replace the latest persisted values.
+        let mut snapshot = self.settings_snapshot.lock().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.root.join("preferences.lock"))?;
+        lock.lock()?;
+        let current = serde_json::to_value(&library.settings)?;
+        let preferences = self.root.join("preferences.json");
+        let mut saved = if preferences.exists() {
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&preferences)?)?
+        } else {
+            current.clone()
+        };
+        let fields = saved.as_object_mut().context("偏好文件必须是 JSON 对象")?;
+        for (key, value) in current.as_object().unwrap() {
+            if !fields.contains_key(key) || snapshot.get(key) != Some(value) {
+                fields.insert(key.clone(), value.clone());
+            }
+        }
+        atomic_json(&preferences, &saved)?;
+        *snapshot = current;
         let path = self.root.join("library.json");
-        let temp = self.root.join("library.tmp");
-        std::fs::write(&temp, serde_json::to_vec_pretty(library)?)?;
         if path.exists() {
             std::fs::copy(&path, self.root.join("library.backup.json"))?;
         }
-        std::fs::rename(&temp, &path).context("无法保存会话库")?;
+        let mut serialized = serde_json::to_value(library)?;
+        serialized["settings"] = saved;
+        atomic_json(&path, &serialized).context("无法保存会话库")?;
         Ok(())
     }
     pub fn attach(&self, path: &Path) -> Result<Attachment> {
@@ -168,6 +219,22 @@ impl Store {
         Ok(path)
     }
 }
+fn atomic_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let temp = path.with_extension(format!("{}.tmp", id()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::File::create(&temp)?;
+        use std::io::Write;
+        file.write_all(&serde_json::to_vec_pretty(value)?)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
 pub fn data_url(a: &Attachment) -> Result<String> {
     Ok(format!(
         "data:{};base64,{}",
@@ -206,10 +273,105 @@ mod tests {
     use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
 
     #[test]
+    fn preferences_migrate_and_survive_old_binary_and_stale_instance_saves() {
+        let root = std::env::temp_dir().join(format!("mori-preferences-test-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut legacy = Library::default();
+        legacy.settings.send_on_enter = true;
+        legacy.settings.language = "en".into();
+        // Simulate an existing installation without a preferences file.
+        std::fs::write(
+            root.join("library.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let active = Store::at(root.clone());
+        let mut current = active.load().unwrap();
+        assert!(current.settings.send_on_enter);
+        active.save(&current).unwrap();
+        // Old versions only write library.json and cannot reset independent preferences.
+        legacy.settings = Settings::default();
+        std::fs::write(
+            root.join("library.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let stale_store = Store::at(root.clone());
+        let mut stale = stale_store.load().unwrap();
+        assert!(stale.settings.send_on_enter);
+        assert_eq!(stale.settings.language, "en");
+        current.settings.send_on_enter = false;
+        current.settings.sidebar_width = 330.;
+        active.save(&current).unwrap();
+        stale.settings.dark = true;
+        stale_store.save(&stale).unwrap();
+        let loaded = Store::at(root.clone()).load().unwrap();
+        assert!(!loaded.settings.send_on_enter);
+        assert_eq!(loaded.settings.sidebar_width, 330.);
+        assert!(loaded.settings.dark);
+        // A second save / instance shutdown must also keep newer preferences.
+        stale_store.save(&stale).unwrap();
+        assert!(
+            !Store::at(root.clone())
+                .load()
+                .unwrap()
+                .settings
+                .send_on_enter
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preferences_preserve_future_fields_and_reject_corrupt_files() {
+        let root = std::env::temp_dir().join(format!("mori-preferences-test-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::at(root.clone());
+        std::fs::write(
+            root.join("preferences.json"),
+            br#"{"send_on_enter":true,"future_field":{"mode":7}}"#,
+        )
+        .unwrap();
+        let mut library = store.load().unwrap();
+        library.settings.dark = true;
+        store.save(&library).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("preferences.json")).unwrap()).unwrap();
+        assert_eq!(saved["future_field"]["mode"], 7);
+        assert_eq!(saved["send_on_enter"], true);
+        std::fs::write(root.join("preferences.json"), b"broken").unwrap();
+        assert!(store.load().is_err());
+        assert!(store.save(&library).is_err());
+        assert_eq!(
+            std::fs::read(root.join("preferences.json")).unwrap(),
+            b"broken"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn partial_advanced_settings_keep_interface_preferences() {
+        let settings = Settings {
+            send_on_enter: true,
+            language: "en".into(),
+            dark: true,
+            sidebar_width: 320.,
+            ..Settings::default()
+        };
+        let updated = settings
+            .patched(r#"{"bash_enabled":true,"bash_path":"custom-bash"}"#)
+            .unwrap();
+        assert!(updated.send_on_enter && updated.dark && updated.bash_enabled);
+        assert_eq!(updated.language, "en");
+        assert_eq!(updated.sidebar_width, 320.);
+        assert_eq!(updated.bash_path, "custom-bash");
+        assert!(settings.patched("[]").is_err());
+    }
+
+    #[test]
     fn clipboard_deduplicates_file_and_bitmap_but_preserves_unrelated_media() {
         let root = std::env::temp_dir().join(format!("mori-paste-test-{}", id()));
         std::fs::create_dir_all(root.join("attachments")).unwrap();
-        let store = Store { root: root.clone() };
+        let store = Store::at(root.clone());
         let picture = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             4,
             3,
@@ -263,7 +425,7 @@ mod tests {
     fn clipboard_bitmap_is_normalized_to_a_model_compatible_png() {
         let root = std::env::temp_dir().join(format!("mori-clipboard-test-{}", id()));
         std::fs::create_dir_all(root.join("attachments")).unwrap();
-        let store = Store { root: root.clone() };
+        let store = Store::at(root.clone());
         let original = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             4,
             3,
@@ -286,7 +448,7 @@ mod tests {
     fn save_round_trip_and_backup() {
         let root = std::env::temp_dir().join(format!("mori-test-{}", id()));
         std::fs::create_dir_all(&root).unwrap();
-        let store = Store { root: root.clone() };
+        let store = Store::at(root.clone());
         let mut lib = Library::default();
         store.save(&lib).unwrap();
         lib.conversations.push(Conversation::new(

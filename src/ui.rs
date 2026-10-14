@@ -38,6 +38,24 @@ fn image_preview_size(path: &str) -> (f32, f32) {
     sizes.insert(path.into(), size);
     size
 }
+fn user_message_html(text: &str) -> String {
+    let escaped = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    escaped
+        .split('\n')
+        .map(|line| {
+            if line.is_empty() {
+                "<p>&nbsp;</p>".to_string()
+            } else {
+                format!("<p>{line}</p>")
+            }
+        })
+        .collect()
+}
 use gpui_kit::component::{
     Disableable, Icon, Sizable, Theme, ThemeMode,
     button::{Button, ButtonVariants},
@@ -802,7 +820,7 @@ impl Mori {
             cx.notify();
             return;
         }
-        let mut message = Message::new("user", text.trim());
+        let mut message = Message::new("user", text.clone());
         message.attachments = std::mem::take(&mut self.attachments);
         let c = self.current_mut().unwrap();
         if c.messages.is_empty() {

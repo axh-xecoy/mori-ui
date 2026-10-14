@@ -619,11 +619,21 @@ impl Mori {
                                 )
                             })
                             .when(!m.content.is_empty(), |d| {
-                                d.child(
+                                let content = if user {
+                                    TextView::html(
+                                        format!("md-{}", m.id),
+                                        user_message_html(&m.content),
+                                    )
+                                    .style(
+                                        gpui_kit::component::text::TextViewStyle {
+                                            paragraph_gap: rems(0.),
+                                            ..Default::default()
+                                        },
+                                    )
+                                } else {
                                     self.rich_markdown(format!("md-{}", m.id), &m.content, p.ink)
-                                        .selectable(true)
-                                        .w_full(),
-                                )
+                                };
+                                d.child(content.selectable(true).w_full())
                             })
                             .children(m.attachments.iter().enumerate().map(|(i, a)| {
                                 let path = a.path.clone();

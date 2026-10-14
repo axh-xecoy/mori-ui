@@ -366,7 +366,7 @@ impl Mori {
                                 if this.save_provider(w, cx) {
                                     let p = this.library.providers[this.selected_provider].clone();
                                     let tx = this.work_tx.clone();
-                                    this.toast = Some("正在获取模型列表…".into());
+                                    this.show_toast("正在获取模型列表…".into());
                                     std::thread::spawn(move || {
                                         let result = provider::models(&p);
                                         let _ = tx.send(Work::Models(p.id, result));
@@ -397,7 +397,7 @@ impl Mori {
                 button("clear-key", "移除已保存的密钥", "key-round").on_click(cx.listener(
                     |this, _, _, cx| {
                         let p = &this.library.providers[this.selected_provider];
-                        this.toast = Some(match storage::set_api_key(p, "") {
+                        this.show_toast(match storage::set_api_key(p, "") {
                             Ok(_) => "已移除系统凭据库中的密钥".into(),
                             Err(e) => format!("{e:#}"),
                         });

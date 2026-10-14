@@ -15,7 +15,7 @@ pub fn start(
     cx.spawn(async move |cx| {
         let input_only=std::env::var_os("MORI_INPUT_CHECK_ONLY").is_some();
         let tools_only=std::env::var_os("MORI_TOOLS_CHECK_ONLY").is_some();
-        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu", "composer-narrow", "composer-narrow-models", "tool-collapsed", "tool-expanded", "tool-expanded-dark", "code-actions", "code-actions-dark", "code-actions-compact"].into_iter().enumerate().filter(|(stage,_)| (!input_only||*stage==19)&&(!tools_only||*stage>=29)) {
+        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu", "composer-narrow", "composer-narrow-models", "tool-collapsed", "tool-expanded", "tool-expanded-dark", "code-actions", "code-actions-dark", "code-actions-compact", "notice-visible", "notice-exiting", "notice-dismissed", "clipboard-attachments", "clipboard-ready", "model-revalidated", "model-empty"].into_iter().enumerate().filter(|(stage,_)| (!input_only||*stage==19)&&(!tools_only||*stage>=29)) {
             let _ = handle.update(cx, |_, window, cx| {
                 if stage==27 {window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),cx);}
                 view.update(cx, |this, cx| {
@@ -140,7 +140,27 @@ print(greet("Mori"))
 "#));
                         },
                         33 => {this.library.settings.dark=true;},
-                        34 => {window.resize(size(px(900.),px(640.)));}, _ => {}
+                        34 => {window.resize(size(px(900.),px(640.)));},
+                        35 => {window.resize(size(px(1280.),px(860.)));this.library.settings.sidebar_width=252.;this.show_toast("偏好已保存".into());},
+                        36 => {assert!(this.toast.is_some());this.toast_started=Some(std::time::Instant::now()-Duration::from_secs(6));assert!(this.tick_toast());assert!(this.toast_closing.is_some());},
+                        37 => {this.toast_closing=Some(std::time::Instant::now()-Duration::from_millis(400));assert!(this.tick_toast());assert!(this.toast.is_none());
+                            this.show_toast("偏好已保存".into());this.dismiss_toast();let old=this.toast_revision;this.show_toast("偏好已保存".into());assert!(this.toast_closing.is_none());assert!(this.toast_revision>old);this.toast=None;
+                        },
+                        38 => {
+                            this.new_chat(window,cx);this.toast=None;
+                            this.composer.update(cx,|s,cx|s.set_value("保持已有文字",window,cx));
+                            let image=Image::from_bytes(ImageFormat::Png,include_bytes!("../../assets/mori-128.png").to_vec());
+                            let paths=ExternalPaths(vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md")].into());
+                            let item=ClipboardItem {entries:vec![ClipboardEntry::Image(image),ClipboardEntry::ExternalPaths(paths),ClipboardEntry::String(ClipboardString::new("不要插入替代文本".into()))]};
+                            this.paste_attachments(item,window,cx);assert_eq!(this.attachments_loading,1);this.send(window,cx);assert!(this.generation.is_none());assert!(this.current().unwrap().messages.is_empty());
+                        },
+                        39 => {assert_eq!(this.attachments_loading,0);assert_eq!(this.attachments.len(),2);assert!(this.attachments.iter().any(|a|a.mime=="image/png"));assert_eq!(this.composer.read(cx).value().as_ref(),"保持已有文字");},
+                        40 => {
+                            let p=&mut this.library.providers[0];p.enabled=true;p.models=vec!["available-model".into()];let pid=p.id.clone();
+                            let c=this.current_mut().unwrap();c.provider_id=pid.clone();c.model="removed-model".into();let old=c.id.clone();
+                            this.new_chat(window,cx);assert_eq!(this.current().unwrap().model,"available-model");assert_eq!(this.library.conversations.iter().find(|c|c.id==old).unwrap().model,"removed-model");
+                        },
+                        41 => {for p in &mut this.library.providers {p.models.clear();}this.new_chat(window,cx);assert!(this.current().unwrap().model.is_empty());}, _ => {}
                     }
                     Theme::change(if this.library.settings.dark {ThemeMode::Dark} else {ThemeMode::Light},Some(window),cx);
                     Mori::tint(cx,this.library.settings.dark); cx.notify();
@@ -153,7 +173,7 @@ print(greet("Mori"))
                     window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position,..Default::default()}),cx);
                 }
             });
-            cx.background_executor().timer(Duration::from_millis(600)).await;
+            cx.background_executor().timer(Duration::from_millis(if stage==36 {100} else {600})).await;
             let path=directory.join(format!("{name}.png"));
             let result=handle.update(cx, |_, window, cx| { let _ = window.draw(cx); window.render_to_image().and_then(|image|image.save(&path).map_err(Into::into)) });
             eprintln!("snapshot {name}: {result:?}");

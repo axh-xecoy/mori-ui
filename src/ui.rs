@@ -136,10 +136,15 @@ pub struct Mori {
     provider_picker: bool,
     image_mode: bool,
     attachments: Vec<Attachment>,
+    attachments_loading: usize,
     generation: Option<Generation>,
     approval: Option<Approval>,
     expanded: HashSet<String>,
     toast: Option<String>,
+    toast_started: Option<std::time::Instant>,
+    toast_closing: Option<std::time::Instant>,
+    toast_revision: u64,
+    toast_dirty: bool,
     status: String,
     transcript: Option<String>,
     scroll: ScrollHandle,
@@ -400,9 +405,14 @@ impl Mori {
             provider_picker: false,
             image_mode: false,
             attachments: vec![],
+            attachments_loading: 0,
             generation: None,
             approval: None,
             expanded: HashSet::new(),
+            toast_started: toast.as_ref().map(|_| std::time::Instant::now()),
+            toast_closing: None,
+            toast_revision: 0,
+            toast_dirty: true,
             toast,
             status: String::new(),
             transcript: None,
@@ -497,7 +507,7 @@ impl Mori {
         if let Some(store) = &self.store
             && let Err(e) = store.save(&self.library)
         {
-            self.toast = Some(format!("保存失败：{e:#}"));
+            self.show_toast(format!("保存失败：{e:#}"));
         }
     }
     fn stash_draft(&mut self, cx: &App) {
@@ -510,23 +520,13 @@ impl Mori {
     }
     fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stash_draft(cx);
-        let (provider, model, assistant) = self
+        let (provider, model) = self
+            .library
+            .preferred_model(self.current(), self.selected_provider);
+        let assistant = self
             .current()
-            .map(|c| {
-                (
-                    c.provider_id.clone(),
-                    c.model.clone(),
-                    c.assistant_id.clone(),
-                )
-            })
-            .unwrap_or_else(|| {
-                let p = &self.library.providers[self.selected_provider];
-                (
-                    p.id.clone(),
-                    p.models.first().cloned().unwrap_or_default(),
-                    "general".into(),
-                )
-            });
+            .map(|c| c.assistant_id.clone())
+            .unwrap_or_else(|| "general".into());
         let mut c = Conversation::new(provider, model, assistant);
         c.title = tr("新的对话");
         self.library.active_id = Some(c.id.clone());
@@ -584,7 +584,7 @@ impl Mori {
             .as_ref()
             .is_some_and(|g| g.conversation == id)
         {
-            self.toast = Some("先停止回复，再删除这条会话".into());
+            self.show_toast("先停止回复，再删除这条会话".into());
             cx.notify();
             return;
         }
@@ -602,7 +602,7 @@ impl Mori {
                     .update(cx, |s, cx| s.set_value(draft, window, cx));
                 self.rename = false;
             }
-            self.toast = Some(DELETED_NOTICE.into());
+            self.show_toast(DELETED_NOTICE.into());
             self.persist();
             cx.notify();
         }
@@ -612,7 +612,7 @@ impl Mori {
             let id = c.id.clone();
             self.library.conversations.insert(0, c);
             self.select_chat(id, window, cx);
-            self.toast = Some("会话已恢复".into());
+            self.show_toast("会话已恢复".into());
         }
         cx.notify();
     }
@@ -652,7 +652,7 @@ impl Mori {
         if name.trim().is_empty()
             || !(url.trim().starts_with("https://") || url.trim().starts_with("http://"))
         {
-            self.toast = Some("请填写名称和有效的 HTTP / HTTPS 地址".into());
+            self.show_toast("请填写名称和有效的 HTTP / HTTPS 地址".into());
             cx.notify();
             return false;
         }
@@ -660,7 +660,7 @@ impl Mori {
         if !key.is_empty()
             && let Err(e) = storage::set_api_key(p, &key)
         {
-            self.toast = Some(format!("系统凭据库写入失败：{e:#}"));
+            self.show_toast(format!("系统凭据库写入失败：{e:#}"));
             cx.notify();
             return false;
         }
@@ -680,11 +680,11 @@ impl Mori {
         if let Some(store) = &self.store
             && let Err(e) = store.save(&self.library)
         {
-            self.toast = Some(format!("保存服务商失败：{e:#}"));
+            self.show_toast(format!("保存服务商失败：{e:#}"));
             cx.notify();
             return false;
         }
-        self.toast = Some(if normalized != url.trim().trim_end_matches('/') {
+        self.show_toast(if normalized != url.trim().trim_end_matches('/') {
             "配置已保存，Ollama 原生协议地址已移除 /v1 或 /api 后缀；尚未测试连接".into()
         } else {
             "服务商配置已保存；尚未测试连接".into()
@@ -734,7 +734,7 @@ impl Mori {
         cx.notify();
     }
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.generation.is_some() || self.media_busy {
+        if self.generation.is_some() || self.media_busy || self.attachments_loading > 0 {
             return;
         }
         let text = self.composer.read(cx).value().to_string();
@@ -756,13 +756,23 @@ impl Mori {
             .find(|p| p.id == current.provider_id && p.enabled)
             .cloned()
         else {
-            self.toast = Some("请先选择一个已启用的服务商".into());
+            self.show_toast("请先选择一个已启用的服务商".into());
             cx.notify();
             return;
         };
         if current.model.is_empty() && !self.image_mode {
             self.model_picker = true;
-            self.toast = Some("先选择模型；本地服务可在设置中获取模型列表".into());
+            self.show_toast("先选择模型；本地服务可在设置中获取模型列表".into());
+            cx.notify();
+            return;
+        }
+        if !self.image_mode
+            && !self
+                .library
+                .model_available(&current.provider_id, &current.model)
+        {
+            self.model_picker = true;
+            self.show_toast("当前模型已被移除或停用，请重新选择".into());
             cx.notify();
             return;
         }
@@ -879,10 +889,47 @@ impl Mori {
         if edit {
             self.attachments = edited.attachments;
         }
-        self.toast = Some("已创建会话分支，原对话保留".into());
+        self.show_toast("已创建会话分支，原对话保留".into());
         cx.notify();
     }
+    fn show_toast(&mut self, text: String) {
+        self.toast = Some(text);
+        self.toast_started = Some(std::time::Instant::now());
+        self.toast_closing = None;
+        self.toast_revision = self.toast_revision.wrapping_add(1);
+        self.toast_dirty = true;
+    }
+    fn dismiss_toast(&mut self) {
+        if self.toast.is_some() && self.toast_closing.is_none() {
+            self.toast_closing = Some(std::time::Instant::now());
+            self.toast_dirty = true;
+        }
+    }
+    fn tick_toast(&mut self) -> bool {
+        let mut changed = std::mem::take(&mut self.toast_dirty);
+        if self.toast.is_none() {
+            self.toast_started = None;
+            self.toast_closing = None;
+        } else if self
+            .toast_closing
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(320))
+        {
+            self.toast = None;
+            self.toast_started = None;
+            self.toast_closing = None;
+            changed = true;
+        } else if self.toast_closing.is_none()
+            && self.toast_started.is_some_and(|t| {
+                t.elapsed() >= Duration::from_secs(if self.show_undo_delete() { 8 } else { 5 })
+            })
+        {
+            self.dismiss_toast();
+            changed = true;
+        }
+        changed
+    }
     fn poll(&mut self, cx: &mut Context<Self>) {
+        let toast_changed = self.tick_toast();
         let offset = self.scroll.offset().y;
         // Markdown can measure a second frame after its source changes. Keep the
         // bottom anchored across that frame until the reader scrolls upward.
@@ -897,7 +944,7 @@ impl Mori {
             self.stash_draft(cx);
             self.persist();
         }
-        let mut changed = false;
+        let mut changed = toast_changed;
         let mut done = false;
         let events: Vec<_> = self
             .generation
@@ -944,7 +991,7 @@ impl Mori {
                             c.messages.push(m);
                         }
                     }
-                    self.toast = Some(e);
+                    self.show_toast(e);
                 }
                 Event::Done => {
                     done = true;
@@ -974,9 +1021,9 @@ impl Mori {
                             });
                         }
                         self.persist();
-                        self.toast = Some("连接成功，模型列表已更新".into());
+                        self.show_toast("连接成功，模型列表已更新".into());
                     }
-                    Err(e) => self.toast = Some(format!("获取模型失败：{e:#}")),
+                    Err(e) => self.show_toast(format!("获取模型失败：{e:#}")),
                 },
                 Work::Transcription(result) => {
                     self.recording = None;
@@ -985,9 +1032,9 @@ impl Mori {
                     match result {
                         Ok(text) => {
                             self.transcript = Some(text);
-                            self.toast = Some("转写完成，可以插入输入框".into());
+                            self.show_toast("转写完成，可以插入输入框".into());
                         }
-                        Err(e) => self.toast = Some(format!("转写失败：{e:#}")),
+                        Err(e) => self.show_toast(format!("转写失败：{e:#}")),
                     }
                 }
                 Work::Speech(result) => {
@@ -1000,7 +1047,7 @@ impl Mori {
                                 path.to_string_lossy().replace('\\', "/")
                             ));
                         }
-                        Err(e) => self.toast = Some(format!("朗读失败：{e:#}")),
+                        Err(e) => self.show_toast(format!("朗读失败：{e:#}")),
                     }
                 }
                 Work::Image(id, result) => {
@@ -1022,23 +1069,26 @@ impl Mori {
                     }
                     self.persist();
                 }
-                Work::Attach(id, result) => match result {
-                    Ok(a) => {
-                        if self.library.active_id.as_deref() == Some(&id) {
-                            self.attachments.extend(a);
-                            self.stash_draft(cx);
-                        } else if let Some(c) =
-                            self.library.conversations.iter_mut().find(|c| c.id == id)
-                        {
-                            c.draft_attachments.extend(a);
-                            self.toast = Some("附件已添加到原会话草稿".into());
-                        } else {
-                            self.toast = Some("原会话已删除，附件未加入其他会话".into());
+                Work::Attach(id, result) => {
+                    self.attachments_loading = self.attachments_loading.saturating_sub(1);
+                    match result {
+                        Ok(a) => {
+                            if self.library.active_id.as_deref() == Some(&id) {
+                                self.attachments.extend(a);
+                                self.stash_draft(cx);
+                            } else if let Some(c) =
+                                self.library.conversations.iter_mut().find(|c| c.id == id)
+                            {
+                                c.draft_attachments.extend(a);
+                                self.show_toast("附件已添加到原会话草稿".into());
+                            } else {
+                                self.show_toast("原会话已删除，附件未加入其他会话".into());
+                            }
+                            self.persist();
                         }
-                        self.persist();
+                        Err(e) => self.show_toast(format!("添加附件失败：{e:#}")),
                     }
-                    Err(e) => self.toast = Some(format!("添加附件失败：{e:#}")),
-                },
+                }
                 Work::Imported(result) => match result {
                     Ok(lib) => {
                         for c in lib.conversations {
@@ -1052,16 +1102,14 @@ impl Mori {
                             }
                         }
                         self.persist();
-                        self.toast = Some("会话已导入；服务商和密钥沿用本机设置".into());
+                        self.show_toast("会话已导入；服务商和密钥沿用本机设置".into());
                     }
-                    Err(e) => self.toast = Some(format!("导入失败：{e:#}")),
+                    Err(e) => self.show_toast(format!("导入失败：{e:#}")),
                 },
-                Work::Notice(result) => {
-                    self.toast = Some(match result {
-                        Ok(s) => s,
-                        Err(e) => format!("{e:#}"),
-                    })
-                }
+                Work::Notice(result) => self.show_toast(match result {
+                    Ok(s) => s,
+                    Err(e) => format!("{e:#}"),
+                }),
             }
         }
         if follow && cid.is_some() && cid == self.library.active_id && self.page == Page::Chat {
@@ -1100,6 +1148,7 @@ impl Mori {
     }
     fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.attachment_target(window, cx);
+        self.attachments_loading += 1;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
             if let Some(paths) = rfd::FileDialog::new()
@@ -1115,8 +1164,46 @@ impl Mori {
             {
                 let result = Store::new().and_then(|s| paths.iter().map(|p| s.attach(p)).collect());
                 let _ = tx.send(Work::Attach(id, result));
+            } else {
+                let _ = tx.send(Work::Attach(id, Ok(vec![])));
             }
         });
+        cx.notify();
+    }
+    fn paste_attachments(
+        &mut self,
+        item: ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.generation.is_some() || self.media_busy {
+            return;
+        }
+        let target = self.attachment_target(window, cx);
+        self.attachments_loading += 1;
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<Vec<Attachment>> {
+                let store = Store::new()?;
+                let mut attachments = vec![];
+                for entry in item.entries {
+                    match entry {
+                        ClipboardEntry::Image(image) => {
+                            attachments.push(store.clipboard_image(image.bytes())?)
+                        }
+                        ClipboardEntry::ExternalPaths(paths) => {
+                            for path in paths.paths() {
+                                attachments.push(store.attach(path)?);
+                            }
+                        }
+                        ClipboardEntry::String(_) => {}
+                    }
+                }
+                Ok(attachments)
+            })();
+            let _ = tx.send(Work::Attach(target, result));
+        });
+        cx.notify();
     }
     fn attach_paths(
         &mut self,
@@ -1125,12 +1212,14 @@ impl Mori {
         cx: &mut Context<Self>,
     ) {
         let id = self.attachment_target(window, cx);
+        self.attachments_loading += 1;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
             let result =
                 Store::new().and_then(|store| paths.iter().map(|p| store.attach(p)).collect());
             let _ = tx.send(Work::Attach(id, result));
         });
+        cx.notify();
     }
     fn microphone(&mut self, cx: &mut Context<Self>) {
         if let Some(stop) = self.recording.take() {
@@ -1146,7 +1235,7 @@ impl Mori {
             return;
         };
         if p.protocol != Protocol::OpenAi {
-            self.toast = Some("语音输入需要选择支持音频转写的 OpenAI 兼容服务商".into());
+            self.show_toast("语音输入需要选择支持音频转写的 OpenAI 兼容服务商".into());
             cx.notify();
             return;
         }

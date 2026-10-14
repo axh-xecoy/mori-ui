@@ -936,6 +936,7 @@ impl Mori {
     fn render_composer(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let busy = self.generation.is_some() || self.media_busy;
         let tools = self.library.settings.tools_enabled;
+        let paste_view = cx.entity().downgrade();
         div()
             .w_full()
             .flex_shrink_0()
@@ -1091,6 +1092,30 @@ impl Mori {
                     })
                     .child(
                         Textarea::new(&self.composer)
+                            .on_paste(move |item, window, cx| {
+                                let media = item.entries.iter().any(|entry| match entry {
+                                    ClipboardEntry::Image(_) => true,
+                                    ClipboardEntry::ExternalPaths(paths) => {
+                                        !paths.paths().is_empty()
+                                    }
+                                    ClipboardEntry::String(_) => false,
+                                });
+                                if !media {
+                                    return false;
+                                }
+                                let item = item.clone();
+                                let view = paste_view.clone();
+                                let handle = window.window_handle();
+                                // Input owns its state during paste; defer draft updates until that borrow ends.
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, cx| {
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.paste_attachments(item, window, cx)
+                                        });
+                                    });
+                                });
+                                true
+                            })
                             .appearance(false)
                             .bordered(false)
                             .disabled(busy)
@@ -1255,7 +1280,9 @@ impl Mori {
                                             .icon(icon("arrow-up"))
                                             .small()
                                             .label(tr("发送"))
-                                            .disabled(self.media_busy)
+                                            .disabled(
+                                                self.media_busy || self.attachments_loading > 0,
+                                            )
                                             .on_click(
                                                 cx.listener(|this, _, w, cx| this.send(w, cx)),
                                             )
@@ -1263,12 +1290,16 @@ impl Mori {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .h(px(20.))
-                    .text_center()
-                    .child(label(self.status.clone(), p.muted)),
-            )
+            .child(div().h(px(20.)).text_center().child(label(
+                if self.generation.is_some() {
+                    String::new()
+                } else if self.attachments_loading > 0 {
+                    tr("正在添加附件…")
+                } else {
+                    self.status.clone()
+                },
+                p.muted,
+            )))
             .when(self.transcript.is_some(), |d| {
                 d.child(
                     button("insert-transcript", "插入音频转写", "text-cursor-input").on_click(
@@ -1432,29 +1463,34 @@ impl Mori {
                                     .track_scroll(&self.scroll)
                                     .px_8()
                                     .child(
-                                        div()
-                                            .max_w(px(896.))
-                                            .mx_auto()
-                                            .py_4()
-                                            .children(c.unwrap().messages.iter().enumerate().map(
-                                                |(i, m)| self.render_message(m, i, p, window, cx),
-                                            ))
-                                            .child(
-                                                div()
-                                                    .h(px(40.))
-                                                    .flex()
-                                                    .items_center()
-                                                    .text_sm()
-                                                    .text_color(rgb(p.accent))
-                                                    .when(
-                                                        self.generation.is_some()
-                                                            && self.approval.is_none(),
-                                                        |d| d.child(tr("●  Mori 正在回复…")),
-                                                    ),
-                                            ),
+                                        div().max_w(px(896.)).mx_auto().py_4().children(
+                                            c.unwrap().messages.iter().enumerate().map(|(i, m)| {
+                                                self.render_message(m, i, p, window, cx)
+                                            }),
+                                        ),
                                     )
                                     .into_any_element()
                             })
+                            .child(
+                                div().w_full().flex_shrink_0().px_8().child(
+                                    div()
+                                        .w_full()
+                                        .max_w(px(896.))
+                                        .mx_auto()
+                                        .h(px(24.))
+                                        .flex()
+                                        .items_center()
+                                        .text_sm()
+                                        .text_color(rgb(p.accent))
+                                        .when(
+                                            self.generation.as_ref().is_some_and(|g| {
+                                                self.library.active_id.as_ref()
+                                                    == Some(&g.conversation)
+                                            }) && self.approval.is_none(),
+                                            |d| d.child(tr("●  Mori 正在回复…")),
+                                        ),
+                                ),
+                            )
                             .child(self.render_composer(p, cx)),
                     )
                     .when(self.model_picker, |d| {
@@ -1607,7 +1643,7 @@ impl Mori {
                                         let name =
                                             this.assistant_name.read(cx).value().trim().to_string();
                                         if name.is_empty() {
-                                            this.toast = Some("助手名称不能为空".into());
+                                            this.show_toast("助手名称不能为空".into());
                                         } else {
                                             let a = &mut this.library.assistants
                                                 [this.selected_assistant];
@@ -1615,7 +1651,7 @@ impl Mori {
                                             a.prompt =
                                                 this.assistant_prompt.read(cx).value().to_string();
                                             this.persist();
-                                            this.toast = Some("助手已保存".into());
+                                            this.show_toast("助手已保存".into());
                                         }
                                         cx.notify();
                                     })),
@@ -1668,12 +1704,26 @@ impl Render for Mori {
                     < 420.);
         div()
             .id("mori-root")
+            .relative()
             .size_full()
             .flex()
             .bg(rgb(p.bg))
             .text_color(rgb(p.ink))
             .font_family("Microsoft YaHei")
             .text_base()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if show_sidebar
+                        && (f32::from(event.position.x) - this.library.settings.sidebar_width).abs()
+                            <= 4.
+                    {
+                        this.resizing_sidebar = true;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, w, cx| {
                 if this.resizing_sidebar {
                     let max = (f32::from(w.viewport_size().width) - 500.).clamp(220., 380.);
@@ -1728,24 +1778,7 @@ impl Render for Mori {
                     cx.notify();
                 }
             }))
-            .when(show_sidebar, |d| {
-                d.child(self.render_sidebar(p, cx)).child(
-                    div()
-                        .id("sidebar-resize")
-                        .w(px(5.))
-                        .h_full()
-                        .flex_shrink_0()
-                        .cursor(CursorStyle::ResizeLeftRight)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.resizing_sidebar = true;
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        ),
-                )
-            })
+            .when(show_sidebar, |d| d.child(self.render_sidebar(p, cx)))
             .child(
                 div()
                     .flex()
@@ -1753,6 +1786,8 @@ impl Render for Mori {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
+                    .overflow_hidden()
                     .when(!self.sidebar && self.page != Page::Chat, |d| {
                         d.child(
                             button("restore-sidebar", "显示侧栏", "panel-left").on_click(
@@ -1763,9 +1798,19 @@ impl Render for Mori {
                             ),
                         )
                     })
+                    .child(match self.page {
+                        Page::Chat => self.render_chat(p, window, cx).into_any_element(),
+                        Page::Assistants => self.render_assistants(p, cx).into_any_element(),
+                        Page::Tools => self.render_tools(p, cx).into_any_element(),
+                        Page::Settings => self.render_settings(p, cx).into_any_element(),
+                    })
                     .when_some(self.toast.clone(), |d, text| {
                         d.child(
                             div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
                                 .flex()
                                 .items_center()
                                 .justify_between()
@@ -1785,18 +1830,60 @@ impl Render for Mori {
                                 })
                                 .child(tiny("dismiss-toast", "x", "关闭提示").on_click(
                                     cx.listener(|this, _, _, cx| {
-                                        this.toast = None;
+                                        this.dismiss_toast();
                                         cx.notify();
                                     }),
-                                )),
+                                ))
+                                .with_animation(
+                                    format!(
+                                        "notice-{}-{}",
+                                        self.toast_revision,
+                                        self.toast_closing.is_some()
+                                    ),
+                                    Animation::new(Duration::from_millis(
+                                        if self.toast_closing.is_some() {
+                                            300
+                                        } else {
+                                            180
+                                        },
+                                    ))
+                                    .with_easing(|t: f32| 1. - (1. - t).powi(3)),
+                                    {
+                                        let closing = self.toast_closing.is_some();
+                                        move |d, progress| {
+                                            if closing {
+                                                d.top(px(-48. * progress)).opacity(1. - progress)
+                                            } else {
+                                                d.top(px(-24. * (1. - progress))).opacity(progress)
+                                            }
+                                        }
+                                    },
+                                ),
                         )
-                    })
-                    .child(match self.page {
-                        Page::Chat => self.render_chat(p, window, cx).into_any_element(),
-                        Page::Assistants => self.render_assistants(p, cx).into_any_element(),
-                        Page::Tools => self.render_tools(p, cx).into_any_element(),
-                        Page::Settings => self.render_settings(p, cx).into_any_element(),
                     }),
             )
+            .when(show_sidebar, |d| {
+                d.child(
+                    div()
+                        .id("sidebar-resize")
+                        .absolute()
+                        .h_full()
+                        .left(px(
+                            self.library.settings.sidebar_width.clamp(220., 380.) - 2.5
+                        ))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(5.))
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.resizing_sidebar = true;
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
     }
 }

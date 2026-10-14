@@ -301,6 +301,40 @@ pub struct Library {
     pub settings: Settings,
     pub active_id: Option<String>,
 }
+impl Library {
+    pub fn model_available(&self, provider_id: &str, model: &str) -> bool {
+        !model.is_empty()
+            && self
+                .providers
+                .iter()
+                .any(|p| p.id == provider_id && p.enabled && p.models.iter().any(|m| m == model))
+    }
+    pub fn preferred_model(
+        &self,
+        current: Option<&Conversation>,
+        selected: usize,
+    ) -> (String, String) {
+        if let Some(c) = current
+            && self.model_available(&c.provider_id, &c.model)
+        {
+            return (c.provider_id.clone(), c.model.clone());
+        }
+        let preferred = current.and_then(|c| self.providers.iter().find(|p| p.id == c.provider_id));
+        let mut candidates = preferred
+            .into_iter()
+            .chain(self.providers.get(selected))
+            .chain(self.providers.iter());
+        for p in candidates.clone().filter(|p| p.enabled) {
+            if let Some(model) = p.models.iter().find(|m| !m.trim().is_empty()) {
+                return (p.id.clone(), model.clone());
+            }
+        }
+        candidates
+            .find(|p| p.enabled)
+            .map(|p| (p.id.clone(), String::new()))
+            .unwrap_or_default()
+    }
+}
 impl Default for Library {
     fn default() -> Self {
         Self {
@@ -316,6 +350,37 @@ impl Default for Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_chats_do_not_inherit_removed_or_disabled_models() {
+        let mut library = Library::default();
+        let p = &mut library.providers[0];
+        p.models = vec!["available".into()];
+        let pid = p.id.clone();
+        let mut current = Conversation::new(pid.clone(), "removed".into(), "general".into());
+        assert_eq!(
+            library.preferred_model(Some(&current), 0),
+            (pid.clone(), "available".into())
+        );
+        current.model = "available".into();
+        assert_eq!(
+            library.preferred_model(Some(&current), 0),
+            (pid.clone(), "available".into())
+        );
+        library.providers[0].enabled = false;
+        let chosen = library.preferred_model(Some(&current), 0);
+        assert_ne!(chosen.0, pid);
+        assert!(library.model_available(&chosen.0, &chosen.1));
+        library.providers.clear();
+        assert_eq!(
+            library.preferred_model(Some(&current), 99),
+            (String::new(), String::new())
+        );
+        let mut library = Library::default();
+        for provider in &mut library.providers {
+            provider.models.clear();
+        }
+        assert!(library.preferred_model(Some(&current), 99).1.is_empty());
+    }
     #[test]
     fn older_preferences_keep_their_values_and_gain_safe_defaults() {
         let settings: Settings =

@@ -187,14 +187,14 @@ impl Mori {
                                 let url = this.mcp_url.read(cx).value().trim().to_string();
                                 let command = this.mcp_command.read(cx).value().trim().to_string();
                                 if name.is_empty() || (url.is_empty() && command.is_empty()) {
-                                    this.toast = Some("请填写名称，以及远程地址或本地程序".into());
+                                    this.show_toast("请填写名称，以及远程地址或本地程序".into());
                                     cx.notify();
                                     return;
                                 }
                                 if !url.is_empty()
                                     && !(url.starts_with("https://") || url.starts_with("http://"))
                                 {
-                                    this.toast = Some("远程服务地址需使用 HTTP 或 HTTPS".into());
+                                    this.show_toast("远程服务地址需使用 HTTP 或 HTTPS".into());
                                     cx.notify();
                                     return;
                                 }
@@ -216,7 +216,7 @@ impl Mori {
                                 });
                                 this.load_advanced(w, cx);
                                 this.persist();
-                                this.toast = Some(
+                                this.show_toast(
                                     "连接已添加。开启工具后，聊天时会自动发现可用能力。".into(),
                                 );
                                 cx.notify();
@@ -268,9 +268,9 @@ impl Mori {
                                     this.transcription_model.read(cx).value().trim().to_string();
                                 this.load_advanced(w, cx);
                                 this.persist();
-                                this.toast = Some("偏好已保存".into());
+                                this.show_toast("偏好已保存".into());
                             }
-                            _ => this.toast = Some("创造性须为 0–2，最长输出须为正整数".into()),
+                            _ => this.show_toast("创造性须为 0–2，最长输出须为正整数".into()),
                         }
                         cx.notify();
                     })),
@@ -292,8 +292,8 @@ impl Mori {
                             this.image_model.update(cx, |s,cx| s.set_value(this.library.settings.image_model.clone(),w,cx));
                             this.speech_model.update(cx, |s,cx| s.set_value(this.library.settings.speech_model.clone(),w,cx));
                             this.transcription_model.update(cx, |s,cx| s.set_value(this.library.settings.transcription_model.clone(),w,cx));
-                            this.persist(); this.toast = Some("扩展设置已保存".into());
-                        }, Ok(_) => this.toast = Some("温度须为 0–2，max_tokens 须大于 0".into()), Err(e) => this.toast = Some(format!("JSON 格式错误：{e}")),
+                            this.persist(); this.show_toast("扩展设置已保存".into());
+                        }, Ok(_) => this.show_toast("温度须为 0–2，max_tokens 须大于 0".into()), Err(e) => this.show_toast(format!("JSON 格式错误：{e}")),
                     } cx.notify();
                 })))
                 .child(label("函数参数 JSON 通过 stdin 交给 command，程序输出返回模型。每次调用都需要确认。", p.muted))))

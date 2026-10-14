@@ -25,6 +25,14 @@ pub fn tr(text: &str) -> String {
         }
     }
     match text {
+        "剪贴板图片过大" => "Clipboard image is too large",
+
+        "正在添加附件…" => "Adding attachments…",
+
+        "当前模型已被移除或停用，请重新选择" => "This model was removed or disabled. Choose another model.",
+
+        "粘贴图片.png" => "Pasted image.png", "剪贴板图片无法读取" => "Cannot decode clipboard image",
+
         "复制代码"=>"Copy code", "下载代码"=>"Download code", "保存代码"=>"Save code", "代码文件"=>"Code file", "代码已保存"=>"Code saved",
 
         "已返回" => "Returned", "调用中" => "Running", "未完成" => "Incomplete", "调用参数" => "Arguments", "返回结果" => "Output", "复制调用参数" => "Copy arguments", "复制完整已保存结果" => "Copy full saved output", "仅预览前 20,000 字符，可复制完整已保存结果" => "Preview limited to 20,000 characters; copy the full saved output",

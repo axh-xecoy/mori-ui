@@ -84,6 +84,31 @@ impl Store {
             text,
         })
     }
+    pub fn clipboard_image(&self, bytes: &[u8]) -> Result<Attachment> {
+        if bytes.len() > 128 * 1024 * 1024 {
+            anyhow::bail!("剪贴板图片过大");
+        }
+        let mut reader =
+            image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(16384);
+        limits.max_image_height = Some(16384);
+        limits.max_alloc = Some(96 * 1024 * 1024);
+        reader.limits(limits);
+        let decoded = reader.decode().context("剪贴板图片无法读取")?;
+        let mut png = std::io::Cursor::new(Vec::new());
+        decoded.write_to(&mut png, image::ImageFormat::Png)?;
+        if png.get_ref().len() > 20 * 1024 * 1024 {
+            anyhow::bail!("附件上限为 20 MB");
+        }
+        let path = self.save_media(png.get_ref(), "png")?;
+        Ok(Attachment {
+            name: crate::i18n::tr("粘贴图片.png"),
+            path: path.to_string_lossy().into(),
+            mime: "image/png".into(),
+            text: None,
+        })
+    }
     pub fn save_media(&self, bytes: &[u8], ext: &str) -> Result<PathBuf> {
         let path = self
             .root
@@ -128,6 +153,29 @@ pub fn set_api_key(provider: &Provider, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_bitmap_is_normalized_to_a_model_compatible_png() {
+        let root = std::env::temp_dir().join(format!("mori-clipboard-test-{}", id()));
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        let store = Store { root: root.clone() };
+        let original = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            3,
+            image::Rgb([12, 34, 56]),
+        ));
+        for format in [image::ImageFormat::Bmp, image::ImageFormat::Png] {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            original.write_to(&mut bytes, format).unwrap();
+            let attachment = store.clipboard_image(bytes.get_ref()).unwrap();
+            assert_eq!(attachment.mime, "image/png");
+            let saved = std::fs::read(attachment.path).unwrap();
+            assert!(saved.starts_with(b"\x89PNG\r\n\x1a\n"));
+            let decoded = image::load_from_memory(&saved).unwrap().to_rgb8();
+            assert_eq!(decoded, original.to_rgb8());
+        }
+        assert!(store.clipboard_image(b"not an image").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn save_round_trip_and_backup() {
         let root = std::env::temp_dir().join(format!("mori-test-{}", id()));

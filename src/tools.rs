@@ -305,6 +305,99 @@ fn this_duplicate(map: &std::collections::HashMap<String, Target>, name: &str) -
     map.contains_key(name)
 }
 
+fn decode_output(bytes: &[u8]) -> String {
+    // PowerShell and native Windows programs can emit UTF-16 instead of UTF-8.
+    if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        let little_endian = bytes[0] == 0xff;
+        let units: Vec<_> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                if little_endian {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        let mut text = String::from_utf16_lossy(&units);
+        if !bytes.len().is_multiple_of(2) {
+            text.push('\u{fffd}');
+        }
+        return text;
+    }
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    #[cfg(windows)]
+    {
+        // Git Bash can emit a Windows-localized timezone in the ANSI code page,
+        // even when LANG is UTF-8. Never replace those bytes before conversion.
+        // SAFETY: These functions have no pointer arguments or preconditions.
+        let code_pages = unsafe { [GetACP(), GetOEMCP()] };
+        for code_page in code_pages {
+            if let Some(text) = decode_windows_output(bytes, code_page) {
+                return text;
+            }
+        }
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetACP() -> u32;
+    fn GetOEMCP() -> u32;
+    fn MultiByteToWideChar(
+        code_page: u32,
+        flags: u32,
+        input: *const u8,
+        input_len: i32,
+        output: *mut u16,
+        output_len: i32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn decode_windows_output(bytes: &[u8], code_page: u32) -> Option<String> {
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    let input_len = i32::try_from(bytes.len()).ok()?;
+    // SAFETY: Input remains valid for input_len bytes. A null output requests
+    // its size; the second call receives a buffer with exactly that capacity.
+    unsafe {
+        let count = MultiByteToWideChar(
+            code_page,
+            8, /* MB_ERR_INVALID_CHARS */
+            bytes.as_ptr(),
+            input_len,
+            std::ptr::null_mut(),
+            0,
+        );
+        if count <= 0 {
+            return None;
+        }
+        let mut output = vec![0u16; count as usize];
+        let written = MultiByteToWideChar(
+            code_page,
+            8,
+            bytes.as_ptr(),
+            input_len,
+            output.as_mut_ptr(),
+            count,
+        );
+        if written <= 0 {
+            return None;
+        }
+        output.truncate(written as usize);
+        String::from_utf16(&output).ok()
+    }
+}
+
 fn run_process(
     program: &str,
     args: &[String],
@@ -327,19 +420,32 @@ fn run_process(
     let read = |stream: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
             let mut bytes = vec![];
+            let mut truncated = false;
             let mut stream = stream;
             let mut chunk = [0u8; 8192];
             loop {
                 match stream.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if bytes.len() < 128 * 1024 {
-                            bytes.extend_from_slice(&chunk[..n.min(128 * 1024 - bytes.len())]);
-                        }
+                        let keep = n.min(128 * 1024 - bytes.len());
+                        truncated |= keep < n;
+                        bytes.extend_from_slice(&chunk[..keep]);
                     }
                 }
             }
-            String::from_utf8_lossy(&bytes).to_string()
+            // The byte limit may split a UTF-8 character. Keep its valid prefix
+            // rather than misclassifying the entire stream as a legacy encoding.
+            if truncated
+                && let Err(error) = std::str::from_utf8(&bytes)
+                && error.error_len().is_none()
+            {
+                bytes.truncate(error.valid_up_to());
+            }
+            let mut output = decode_output(&bytes);
+            if truncated {
+                output.push_str("\n[输出已截断 / output truncated]");
+            }
+            output
         })
     };
     let out = read(Box::new(stdout));
@@ -372,4 +478,96 @@ fn run_process(
         out.join().unwrap_or_default(),
         err.join().unwrap_or_default()
     ))
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_output_preserves_chinese_emoji_and_bom_encodings() {
+        let text = "中国标准时间 · 你好 🌿\n";
+        assert_eq!(decode_output(text.as_bytes()), text);
+        let mut utf8 = vec![0xef, 0xbb, 0xbf];
+        utf8.extend_from_slice(text.as_bytes());
+        assert_eq!(decode_output(&utf8), text);
+        for little_endian in [true, false] {
+            let mut bytes = if little_endian {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in text.encode_utf16() {
+                bytes.extend_from_slice(&if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            assert_eq!(decode_output(&bytes), text);
+        }
+        assert_eq!(decode_output(&[]), "");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_gbk_timezone_decodes_without_replacement_characters() {
+        let bytes = b"Wed Oct 14 13:50:09 \xd6\xd0\xb9\xfa\xb1\xea\xd7\xbc\xca\xb1\xbc\xe4 2026\n";
+        let text = "Wed Oct 14 13:50:09 中国标准时间 2026\n";
+        assert_eq!(decode_windows_output(bytes, 936).as_deref(), Some(text));
+        // SAFETY: GetACP has no arguments or preconditions.
+        if unsafe { GetACP() } == 936 {
+            assert_eq!(decode_output(bytes), text);
+        }
+    }
+
+    #[test]
+    fn bash_stdout_stderr_and_date_use_the_same_output_decoder() {
+        #[cfg(windows)]
+        let bash = "C:/Program Files/Git/bin/bash.exe";
+        #[cfg(not(windows))]
+        let bash = "bash";
+        let output = run_process(
+            bash,
+            &[
+                "-lc".into(),
+                "printf '你好 🌿\\n'; printf '错误提示\\n' >&2; date".into(),
+            ],
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(output.contains("你好 🌿"));
+        assert!(output.contains("错误提示"));
+        assert!(!output.contains('\u{fffd}'));
+        #[cfg(windows)]
+        {
+            // SAFETY: GetACP has no arguments or preconditions.
+            if unsafe { GetACP() } == 936 {
+                let output = run_process(bash, &["-lc".into(), "printf 'UTF-8: 你好\\n'; printf '\\326\\320\\271\\372\\261\\352\\327\\274\\312\\261\\274\\344\\n' >&2".into()], None, &AtomicBool::new(false)).unwrap();
+                assert!(output.contains("UTF-8: 你好"));
+                assert!(output.contains("中国标准时间"));
+                assert!(!output.contains('\u{fffd}'));
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_utf8_keeps_complete_characters_instead_of_legacy_decoding() {
+        #[cfg(windows)]
+        let bash = "C:/Program Files/Git/bin/bash.exe";
+        #[cfg(not(windows))]
+        let bash = "bash";
+        // 131072 bytes ends in the second byte of a three-byte UTF-8 character.
+        let output = run_process(
+            bash,
+            &["-lc".into(), "printf '你%.0s' {1..45000}".into()],
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(output.contains("你你你"));
+        assert!(output.contains("output truncated"));
+        assert!(!output.contains('\u{fffd}'));
+    }
 }

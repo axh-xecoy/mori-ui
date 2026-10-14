@@ -601,7 +601,7 @@ impl Mori {
                                             .bg(rgb(p.card))
                                             .border_1()
                                             .border_color(rgb(p.line))
-                                            .child(div().flex_1().h(px(1.)).bg(rgb(p.line)))
+                                            .child(div().flex_1())
                                             .child(
                                                 icon(if expanded {
                                                     "chevron-down"

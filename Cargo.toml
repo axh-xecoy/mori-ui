@@ -13,7 +13,7 @@ name = "mori"
 path = "src/main.rs"
 
 [dependencies]
-gpui-kit = "=0.7.3"
+gpui-kit = { version = "=0.7.3", features = ["tree-sitter", "tree-sitter-bash", "tree-sitter-python", "tree-sitter-rust", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-html", "tree-sitter-css", "tree-sitter-go", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-sql", "tree-sitter-toml", "tree-sitter-yaml"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

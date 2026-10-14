@@ -1,6 +1,112 @@
 use super::*;
 
+fn tool_output_preview(text: &str, language: &str) -> String {
+    let preview = text.chars().take(20000).collect::<String>();
+    // Keep returned Markdown/backticks literal inside the output panel.
+    let run = preview.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(run.max(2) + 1);
+    format!("{fence}{language}\n{preview}\n{fence}")
+}
+
+fn code_extension(language: &str) -> &'static str {
+    match language
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "python" | "py" => "py",
+        "rust" | "rs" => "rs",
+        "javascript" | "js" | "jsx" => "js",
+        "typescript" | "ts" => "ts",
+        "tsx" => "tsx",
+        "bash" | "sh" | "shell" => "sh",
+        "powershell" | "ps1" => "ps1",
+        "json" => "json",
+        "html" => "html",
+        "css" => "css",
+        "go" => "go",
+        "c" => "c",
+        "cpp" | "c++" => "cpp",
+        "sql" => "sql",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "java" => "java",
+        "markdown" | "md" => "md",
+        _ => "txt",
+    }
+}
+
 impl Mori {
+    fn rich_markdown(
+        &self,
+        id: impl Into<ElementId>,
+        source: impl AsRef<str>,
+        color: u32,
+    ) -> TextView {
+        use gpui_kit::component::{highlighter::HighlightTheme, text::TextViewStyle};
+        let tx = self.work_tx.clone();
+        let dark = self.library.settings.dark;
+        let mut block_style = StyleRefinement::default().pt(px(40.)).max_h(px(320.));
+        block_style.overflow.y = Some(Overflow::Scroll);
+        crate::math::markdown(id, source, color)
+            .style(
+                TextViewStyle {
+                    highlight_theme: if dark {
+                        HighlightTheme::default_dark()
+                    } else {
+                        HighlightTheme::default_light()
+                    },
+                    is_dark: dark,
+                    ..Default::default()
+                }
+                .code_block(block_style),
+            )
+            .code_block_actions(move |block, _, _| {
+                let language = block.lang().unwrap_or_else(|| "text".into()).to_string();
+                let code = block.code().to_string();
+                let download_code = code.clone();
+                let download_language = language.clone();
+                let tx = tx.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().text_xs().mr_2().child(language))
+                    .child(
+                        tiny("copy-code", "copy", "复制代码")
+                            .size(px(24.))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                            }),
+                    )
+                    .child(
+                        tiny("download-code", "download", "下载代码")
+                            .size(px(24.))
+                            .on_click(move |_, _, _| {
+                                let code = download_code.clone();
+                                let language = download_language.clone();
+                                let tx = tx.clone();
+                                std::thread::spawn(move || {
+                                    let extension = code_extension(&language);
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .set_title(tr("保存代码"))
+                                        .set_file_name(format!("snippet.{extension}"))
+                                        .add_filter(tr("代码文件"), &[extension])
+                                        .save_file()
+                                    {
+                                        let result = std::fs::write(path, code.as_bytes())
+                                            .map(|_| "代码已保存".to_string())
+                                            .map_err(anyhow::Error::from);
+                                        let _ = tx.send(Work::Notice(result));
+                                    }
+                                });
+                            }),
+                    )
+            })
+    }
+
     fn render_sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let query = self.search.read(cx).value().to_lowercase();
         let mut conversations: Vec<_> = self
@@ -356,8 +462,41 @@ impl Mori {
                     }),
             )
     }
-    fn render_message(&self, m: &Message, index: usize, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn render_message(
+        &self,
+        m: &Message,
+        index: usize,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let user = m.role == "user";
+        // A selectable TextView has no intrinsic width through the extra bubble
+        // wrapper. Size short user bubbles with the actual font, then let flex
+        // shrink long messages to the available viewport width.
+        let user_width = if !m.attachments.is_empty() || m.content.len() > 600 {
+            px(680.)
+        } else {
+            m.content
+                .lines()
+                .map(|line| {
+                    let run = TextRun {
+                        len: line.len(),
+                        font: font("Microsoft YaHei"),
+                        color: rgb(p.ink).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    window
+                        .text_system()
+                        .shape_line(line.to_string().into(), px(16.), &[run], None)
+                        .width
+                        + px(40.)
+                })
+                .fold(px(72.), |width, line| width.max(line))
+                .min(px(680.))
+        };
         let text = m.content.clone();
         let speak_text = m.content.clone();
         let expanded = self.expanded.contains(&m.id);
@@ -389,194 +528,362 @@ impl Mori {
                     .flex_1()
                     .min_w_0()
                     .when(user, |d| {
-                        d.flex_initial()
-                            .max_w(px(680.))
-                            .p_4()
-                            .rounded_xl()
-                            .bg(rgb(p.soft))
-                    })
-                    .when(!user, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("Mori"),
-                                )
-                                .when(
-                                    !user
-                                        && m.elapsed_ms > 0
-                                        && !self.generation.as_ref().is_some_and(|g| {
-                                            self.current().is_some_and(|c| c.id == g.conversation)
-                                                && self
-                                                    .current()
-                                                    .and_then(|c| c.messages.last())
-                                                    .is_some_and(|last| last.id == m.id)
-                                        }),
-                                    |d| {
-                                        d.child(label(
-                                            format!(
-                                                "{:.1}s · {} tokens",
-                                                m.elapsed_ms as f64 / 1000.,
-                                                m.tokens
-                                            ),
-                                            p.muted,
-                                        ))
-                                    },
-                                ),
-                        )
-                    })
-                    .when(!m.reasoning.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    button(
-                                        format!("reason-{}", m.id),
-                                        if expanded {
-                                            "收起思考过程"
-                                        } else {
-                                            "查看思考过程"
-                                        },
-                                        "brain",
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            if !this.expanded.remove(&reasoning_id) {
-                                                this.expanded.insert(reasoning_id.clone());
-                                            }
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                                .when(expanded, |d| {
-                                    d.child(
-                                        div()
-                                            .pl_4()
-                                            .border_l_2()
-                                            .border_color(rgb(p.line))
-                                            .text_sm()
-                                            .text_color(rgb(p.muted))
-                                            .child(
-                                                crate::math::markdown(
-                                                    format!("thinking-{}", m.id),
-                                                    m.reasoning.clone(),
-                                                    p.muted,
-                                                )
-                                                .selectable(true),
-                                            ),
-                                    )
-                                }),
-                        )
-                    })
-                    .when(!m.content.is_empty(), |d| {
-                        d.child(
-                            crate::math::markdown(format!("md-{}", m.id), &m.content, p.ink)
-                                .selectable(true)
-                                .w_full(),
-                        )
-                    })
-                    .children(m.attachments.iter().map(|a| {
-                        let path = a.path.clone();
-                        let is_image = a.mime.starts_with("image/");
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .when(is_image, |d| {
-                                d.child(
-                                    img(std::path::PathBuf::from(&a.path))
-                                        .max_w(px(540.))
-                                        .h(px(280.))
-                                        .object_fit(ObjectFit::Contain)
-                                        .rounded_lg(),
-                                )
-                            })
-                            .child(
-                                button(
-                                    format!("attachment-{}-{}", m.id, a.name),
-                                    a.name.clone(),
-                                    if is_image { "image" } else { "file-text" },
-                                )
-                                .on_click(move |_, _, cx| {
-                                    cx.open_url(&format!("file:///{}", path.replace('\\', "/")))
-                                }),
-                            )
-                    }))
-                    .children(m.tools.iter().map(|t| {
-                        card(p)
-                            .gap_2()
-                            .p_3()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(icon("blocks").text_color(rgb(p.accent)))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(t.name.clone()),
-                                    )
-                                    .child(label(
-                                        if t.result.is_some() {
-                                            "已处理"
-                                        } else {
-                                            "待确认"
-                                        },
-                                        p.muted,
-                                    )),
-                            )
-                            .child(
-                                TextView::markdown(
-                                    format!("call-{}", t.id),
-                                    format!("```json\n{}\n```", t.arguments),
-                                )
-                                .selectable(true),
-                            )
-                            .when_some(t.result.clone(), |d, r| {
-                                d.child(
-                                    TextView::markdown(
-                                        format!("result-{}", t.id),
-                                        format!(
-                                            "```text\n{}\n```",
-                                            r.chars().take(12000).collect::<String>()
-                                        ),
-                                    )
-                                    .selectable(true),
-                                )
-                            })
-                    }))
-                    .when_some(m.error.clone(), |d, e| {
-                        d.child(
-                            div()
-                                .p_3()
-                                .rounded_lg()
-                                .bg(rgb(if self.library.settings.dark {
-                                    0x402b28
-                                } else {
-                                    0xfff0eb
-                                }))
-                                .text_sm()
-                                .text_color(rgb(if self.library.settings.dark {
-                                    0xffb4a5
-                                } else {
-                                    0xa54532
-                                }))
-                                .child(tr(&e)),
-                        )
+                        d.flex_initial().w(user_width).max_w(px(680.)).gap_1()
                     })
                     .child(
                         div()
                             .flex()
+                            .flex_col()
+                            .gap_3()
+                            .min_w_0()
+                            .when(user, |d| d.p_4().rounded_xl().bg(rgb(p.soft)))
+                            .when(!user, |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child("Mori"),
+                                        )
+                                        .when(
+                                            !user
+                                                && m.elapsed_ms > 0
+                                                && !self.generation.as_ref().is_some_and(|g| {
+                                                    self.current()
+                                                        .is_some_and(|c| c.id == g.conversation)
+                                                        && self
+                                                            .current()
+                                                            .and_then(|c| c.messages.last())
+                                                            .is_some_and(|last| last.id == m.id)
+                                                }),
+                                            |d| {
+                                                d.child(label(
+                                                    format!(
+                                                        "{:.1}s · {} tokens",
+                                                        m.elapsed_ms as f64 / 1000.,
+                                                        m.tokens
+                                                    ),
+                                                    p.muted,
+                                                ))
+                                            },
+                                        ),
+                                )
+                            })
+                            .when(!m.reasoning.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            button(
+                                                format!("reason-{}", m.id),
+                                                if expanded {
+                                                    "收起思考过程"
+                                                } else {
+                                                    "查看思考过程"
+                                                },
+                                                "brain",
+                                            )
+                                            .on_click(
+                                                cx.listener(move |this, _, _, cx| {
+                                                    if !this.expanded.remove(&reasoning_id) {
+                                                        this.expanded.insert(reasoning_id.clone());
+                                                    }
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        )
+                                        .when(expanded, |d| {
+                                            d.child(
+                                                div()
+                                                    .pl_4()
+                                                    .border_l_2()
+                                                    .border_color(rgb(p.line))
+                                                    .text_sm()
+                                                    .text_color(rgb(p.muted))
+                                                    .child(
+                                                        self.rich_markdown(
+                                                            format!("thinking-{}", m.id),
+                                                            m.reasoning.clone(),
+                                                            p.muted,
+                                                        )
+                                                        .selectable(true),
+                                                    ),
+                                            )
+                                        }),
+                                )
+                            })
+                            .when(!m.content.is_empty(), |d| {
+                                d.child(
+                                    self.rich_markdown(format!("md-{}", m.id), &m.content, p.ink)
+                                        .selectable(true)
+                                        .w_full(),
+                                )
+                            })
+                            .children(m.attachments.iter().map(|a| {
+                                let path = a.path.clone();
+                                let is_image = a.mime.starts_with("image/");
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .when(is_image, |d| {
+                                        d.child(
+                                            img(std::path::PathBuf::from(&a.path))
+                                                .max_w(px(540.))
+                                                .h(px(280.))
+                                                .object_fit(ObjectFit::Contain)
+                                                .rounded_lg(),
+                                        )
+                                    })
+                                    .child(
+                                        button(
+                                            format!("attachment-{}-{}", m.id, a.name),
+                                            a.name.clone(),
+                                            if is_image { "image" } else { "file-text" },
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                cx.open_url(&format!(
+                                                    "file:///{}",
+                                                    path.replace('\\', "/")
+                                                ))
+                                            },
+                                        ),
+                                    )
+                            }))
+                            .children(m.tools.iter().map(|t| {
+                                let key = format!("tool-{}-{}", m.id, t.id);
+                                let expanded = self.expanded.contains(&key);
+                                let toggle_key = key.clone();
+                                let command =
+                                    serde_json::from_str::<serde_json::Value>(&t.arguments)
+                                        .ok()
+                                        .and_then(|value| {
+                                            value["command"].as_str().map(str::to_string)
+                                        })
+                                        .unwrap_or_default();
+                                let summary = command
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(100)
+                                    .collect::<String>();
+                                let waiting = self
+                                    .approval
+                                    .as_ref()
+                                    .is_some_and(|approval| approval.call.id == t.id);
+                                let status = if t.result.is_some() {
+                                    "已返回"
+                                } else if waiting {
+                                    "待确认"
+                                } else if self.generation.as_ref().is_some_and(|g| {
+                                    self.current().is_some_and(|c| c.id == g.conversation)
+                                }) {
+                                    "调用中"
+                                } else {
+                                    "未完成"
+                                };
+                                card(p)
+                                    .gap_2()
+                                    .p_3()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .id(format!("toggle-{key}"))
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .min_w_0()
+                                            .cursor_pointer()
+                                            .hover(|d| d.text_color(rgb(p.accent)))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if !this.expanded.remove(&toggle_key) {
+                                                    this.expanded.insert(toggle_key.clone());
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                icon(if t.name == "bash" {
+                                                    "terminal"
+                                                } else {
+                                                    "blocks"
+                                                })
+                                                .size(px(16.))
+                                                .flex_shrink_0()
+                                                .text_color(rgb(p.accent)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .flex_shrink_0()
+                                                    .child(if t.name == "bash" {
+                                                        "Bash".to_string()
+                                                    } else {
+                                                        t.name.clone()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_xs()
+                                                    .text_color(rgb(p.muted))
+                                                    .truncate()
+                                                    .child(summary),
+                                            )
+                                            .child(label(status, p.muted).flex_shrink_0())
+                                            .child(
+                                                icon(if expanded {
+                                                    "chevron-up"
+                                                } else {
+                                                    "chevron-down"
+                                                })
+                                                .size(px(16.))
+                                                .flex_shrink_0(),
+                                            ),
+                                    )
+                                    .when(expanded, |d| {
+                                        let args =
+                                            serde_json::from_str::<serde_json::Value>(&t.arguments)
+                                                .ok()
+                                                .and_then(|value| {
+                                                    serde_json::to_string_pretty(&value).ok()
+                                                })
+                                                .unwrap_or_else(|| t.arguments.clone());
+                                        let arguments = t.arguments.clone();
+                                        d.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(label("调用参数", p.muted))
+                                                .child(
+                                                    tiny(
+                                                        format!("copy-args-{key}"),
+                                                        "copy",
+                                                        "复制调用参数",
+                                                    )
+                                                    .on_click(move |_, _, cx| {
+                                                        cx.write_to_clipboard(
+                                                            ClipboardItem::new_string(
+                                                                arguments.clone(),
+                                                            ),
+                                                        )
+                                                    }),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(format!("args-scroll-{key}"))
+                                                .max_h(px(120.))
+                                                .min_w_0()
+                                                .overflow_y_scroll()
+                                                .overflow_x_scroll()
+                                                .child(
+                                                    TextView::markdown(
+                                                        format!("call-{key}"),
+                                                        tool_output_preview(&args, "json"),
+                                                    )
+                                                    .selectable(true),
+                                                ),
+                                        )
+                                        .when_some(
+                                            t.result.as_ref(),
+                                            |d, result| {
+                                                let output = result.clone();
+                                                let count = result.lines().count();
+                                                let count_label =
+                                                    if self.library.settings.language == "en" {
+                                                        format!("{count} lines")
+                                                    } else {
+                                                        format!("{count} 行")
+                                                    };
+                                                let clipped = result.chars().count() > 20000;
+                                                d.child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .gap_2()
+                                                                .child(label("返回结果", p.muted))
+                                                                .child(label(count_label, p.muted)),
+                                                        )
+                                                        .child(
+                                                            tiny(
+                                                                format!("copy-result-{key}"),
+                                                                "copy",
+                                                                "复制完整已保存结果",
+                                                            )
+                                                            .on_click(move |_, _, cx| {
+                                                                cx.write_to_clipboard(
+                                                                    ClipboardItem::new_string(
+                                                                        output.clone(),
+                                                                    ),
+                                                                )
+                                                            }),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(format!("output-scroll-{key}"))
+                                                        .max_h(px(240.))
+                                                        .min_w_0()
+                                                        .overflow_y_scroll()
+                                                        .overflow_x_scroll()
+                                                        .child(
+                                                            TextView::markdown(
+                                                                format!("result-{key}"),
+                                                                tool_output_preview(result, "text"),
+                                                            )
+                                                            .selectable(true),
+                                                        ),
+                                                )
+                                                .when(clipped, |d| {
+                                                    d.child(label(
+                                                    "仅预览前 20,000 字符，可复制完整已保存结果",
+                                                    p.muted,
+                                                ))
+                                                })
+                                            },
+                                        )
+                                    })
+                            }))
+                            .when_some(m.error.clone(), |d, e| {
+                                d.child(
+                                    div()
+                                        .p_3()
+                                        .rounded_lg()
+                                        .bg(rgb(if self.library.settings.dark {
+                                            0x402b28
+                                        } else {
+                                            0xfff0eb
+                                        }))
+                                        .text_sm()
+                                        .text_color(rgb(if self.library.settings.dark {
+                                            0xffb4a5
+                                        } else {
+                                            0xa54532
+                                        }))
+                                        .child(tr(&e)),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
                             .gap_1()
+                            .when(user, |d| d.justify_end())
                             .child(tiny(format!("copy-{}", m.id), "copy", "复制消息").on_click(
                                 move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
@@ -982,7 +1289,7 @@ impl Mori {
                     .child(label("回答可能有误，重要信息请核实。", p.muted)),
             )
     }
-    fn render_chat(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn render_chat(&self, p: Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let c = self.current();
         let title = c.map(|c| c.title.as_str()).unwrap_or("新的对话");
         let model = c
@@ -1129,13 +1436,9 @@ impl Mori {
                                             .max_w(px(896.))
                                             .mx_auto()
                                             .py_4()
-                                            .children(
-                                                c.unwrap()
-                                                    .messages
-                                                    .iter()
-                                                    .enumerate()
-                                                    .map(|(i, m)| self.render_message(m, i, p, cx)),
-                                            )
+                                            .children(c.unwrap().messages.iter().enumerate().map(
+                                                |(i, m)| self.render_message(m, i, p, window, cx),
+                                            ))
                                             .child(
                                                 div()
                                                     .h(px(40.))
@@ -1489,7 +1792,7 @@ impl Render for Mori {
                         )
                     })
                     .child(match self.page {
-                        Page::Chat => self.render_chat(p, cx).into_any_element(),
+                        Page::Chat => self.render_chat(p, window, cx).into_any_element(),
                         Page::Assistants => self.render_assistants(p, cx).into_any_element(),
                         Page::Tools => self.render_tools(p, cx).into_any_element(),
                         Page::Settings => self.render_settings(p, cx).into_any_element(),

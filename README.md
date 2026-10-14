@@ -117,3 +117,7 @@ Remove-Item Env:MORI_SNAPSHOT_DIR
 在“工具与扩展”中启用 Bash 后，可选择信任调用，随后 Bash 命令无需逐次确认。默认关闭；MCP 与自定义函数仍需确认，命令在本机直接执行。流式显示约每 80ms 合并更新，状态区域预留高度，生成期间隐藏不停变化的耗时和 token 统计。
 
 接口参考：[Ollama](https://github.com/ollama/ollama/blob/main/docs/openapi.yaml)、[Qwen](https://help.aliyun.com/zh/model-studio/deep-thinking/)、[DeepSeek](https://api-docs.deepseek.com/guides/thinking_mode/)、[OpenAI](https://developers.openai.com/api/docs/guides/reasoning)、[Claude](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)、[OpenRouter](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)。
+
+### 消息与长输出
+
+工具调用默认折叠，展开后长返回值在限高区域滚动，超长预览明确提示并可复制完整已保存结果。用户消息操作位于气泡外侧下方。AI 代码块提供语言标识、复制、另存为与常见语言的浅 / 深色语法高亮，长代码块内部滚动；复制和下载只保留代码正文。

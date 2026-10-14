@@ -14,7 +14,8 @@ pub fn start(
     });
     cx.spawn(async move |cx| {
         let input_only=std::env::var_os("MORI_INPUT_CHECK_ONLY").is_some();
-        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu", "composer-narrow", "composer-narrow-models"].into_iter().enumerate().filter(|(stage,_)| !input_only||*stage==19) {
+        let tools_only=std::env::var_os("MORI_TOOLS_CHECK_ONLY").is_some();
+        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu", "composer-narrow", "composer-narrow-models", "tool-collapsed", "tool-expanded", "tool-expanded-dark", "code-actions", "code-actions-dark", "code-actions-compact"].into_iter().enumerate().filter(|(stage,_)| (!input_only||*stage==19)&&(!tools_only||*stage>=29)) {
             let _ = handle.update(cx, |_, window, cx| {
                 if stage==27 {window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),cx);}
                 view.update(cx, |this, cx| {
@@ -106,7 +107,40 @@ pub fn start(
                         25 => {this.generation=None;this.status.clear();let c=this.current().unwrap().clone();this.library.conversations=vec![c];},
                         26 => {},
                         27 => {this.generation=None;this.status.clear();this.library.settings.sidebar_width=380.;window.resize(size(px(900.),px(640.)));this.set_language("en",window,cx);this.library.settings.tools_enabled=true;},
-                        28 => {this.model_picker=true;}, _ => {}
+                        28 => {this.model_picker=true;},
+                        29 => {
+                            window.resize(size(px(1280.),px(860.)));this.library.settings.sidebar_width=252.;this.set_language("zh-CN",window,cx);this.model_picker=false;
+                            this.new_chat(window,cx);this.toast=None;
+                            let mut reply=Message::new("assistant","命令已完成。详细输出可以按需展开查看。");
+                            reply.tools.push(ToolCall {id:"long-bash-output".into(),name:"bash".into(),arguments:r#"{"command":"find . -type f"}"#.into(),result:Some((1..1500).map(|n|format!("第 {n} 行：文件与目录信息，中文正常显示 🌿\n")).collect::<String>())});
+                            let c=this.current_mut().unwrap();c.title="长输出折叠检查".into();c.messages=vec![reply];
+                            let key=format!("tool-{}-long-bash-output",c.messages[0].id);assert!(!this.expanded.contains(&key));
+                        },
+                        30 => {let key=format!("tool-{}-long-bash-output",this.current().unwrap().messages[0].id);this.expanded.insert(key);},
+                        31 => {this.library.settings.dark=true;},
+                        32 => {
+                            this.new_chat(window,cx);this.toast=None;
+                            let c=this.current_mut().unwrap();c.title="代码与消息操作".into();
+                            c.messages.push(Message::new("user","用 Python 写一个简单的问候函数，再给出一份 JSON 配置。"));
+                            c.messages.push(Message::new("assistant",r#"可以这样写，复制按钮只复制代码，下载会保存为对应类型的文件。
+
+```python
+# 简单问候
+from datetime import datetime
+
+def greet(name: str) -> str:
+    return f"你好，{name} 🌿"
+
+print(greet("Mori"))
+```
+
+```json
+{"name": "Mori", "thinking": true, "temperature": 0.7}
+```
+"#));
+                        },
+                        33 => {this.library.settings.dark=true;},
+                        34 => {window.resize(size(px(900.),px(640.)));}, _ => {}
                     }
                     Theme::change(if this.library.settings.dark {ThemeMode::Dark} else {ThemeMode::Light},Some(window),cx);
                     Mori::tint(cx,this.library.settings.dark); cx.notify();

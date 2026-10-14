@@ -25,6 +25,10 @@ pub fn tr(text: &str) -> String {
         }
     }
     match text {
+        "复制代码"=>"Copy code", "下载代码"=>"Download code", "保存代码"=>"Save code", "代码文件"=>"Code file", "代码已保存"=>"Code saved",
+
+        "已返回" => "Returned", "调用中" => "Running", "未完成" => "Incomplete", "调用参数" => "Arguments", "返回结果" => "Output", "复制调用参数" => "Copy arguments", "复制完整已保存结果" => "Copy full saved output", "仅预览前 20,000 字符，可复制完整已保存结果" => "Preview limited to 20,000 characters; copy the full saved output",
+
         "会话操作" => "Conversation actions", "思考：自动" => "Thinking: Auto", "思考：开启" => "Thinking: On", "思考：关闭" => "Thinking: Off",
         "选择模型默认、开启或关闭思考；需要模型支持" => "Use model default, enable or disable thinking; model support required",
         "信任调用：开启" => "Trusted calls: On", "信任调用：关闭" => "Trusted calls: Off", "信任模式：自动执行 Bash 调用" => "Trusted mode: execute Bash automatically", "每次执行前确认" => "Confirm before each call", "●  Mori 正在回复…" => "●  Mori is responding…",

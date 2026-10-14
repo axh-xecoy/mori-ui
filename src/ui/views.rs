@@ -655,19 +655,6 @@ impl Mori {
                                                         .h_full()
                                                         .object_fit(ObjectFit::Contain)
                                                         .rounded_lg(),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .absolute()
-                                                        .top_2()
-                                                        .right_2()
-                                                        .p_1()
-                                                        .rounded_md()
-                                                        .bg(rgb(p.card))
-                                                        .child(
-                                                            icon("maximize-2")
-                                                                .text_color(rgb(p.ink)),
-                                                        ),
                                                 ),
                                         )
                                     })

@@ -594,6 +594,22 @@ impl Mori {
                                                 },
                                                 "brain",
                                             )
+                                            .w_full()
+                                            .justify_start()
+                                            .h(px(36.))
+                                            .px_3()
+                                            .bg(rgb(p.card))
+                                            .border_1()
+                                            .border_color(rgb(p.line))
+                                            .child(div().flex_1().h(px(1.)).bg(rgb(p.line)))
+                                            .child(
+                                                icon(if expanded {
+                                                    "chevron-down"
+                                                } else {
+                                                    "chevron-right"
+                                                })
+                                                .text_color(rgb(p.muted)),
+                                            )
                                             .on_click(
                                                 cx.listener(move |this, _, _, cx| {
                                                     if !this.expanded.remove(&reasoning_id) {

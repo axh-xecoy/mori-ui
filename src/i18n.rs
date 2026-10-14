@@ -26,6 +26,9 @@ pub fn tr(text: &str) -> String {
         }
     }
     match text {
+        "兼容后端" => "Compatible backend",
+        "自动识别" => "Detect automatically",
+        "标准兼容" => "Standard compatible",
         "模型 ID" => "Model ID",
         "模型与高级参数" => "Models and parameters",
         "添加模型" => "Add model",

@@ -90,6 +90,9 @@ pub fn models(provider: &Provider) -> Result<Vec<String>> {
         .send()?,
     )?
     .json()?;
+    if provider.protocol == Protocol::OpenAi {
+        remember_backend(provider, backend_from_models(&response));
+    }
     let items = if provider.protocol == Protocol::Ollama {
         &response["models"]
     } else {
@@ -112,6 +115,73 @@ pub fn models(provider: &Provider) -> Result<Vec<String>> {
     models.sort();
     models.dedup();
     Ok(models)
+}
+type BackendCache = std::sync::Mutex<std::collections::HashMap<String, (Instant, OpenAiBackend)>>;
+fn backend_cache() -> &'static BackendCache {
+    static CACHE: std::sync::OnceLock<BackendCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+fn backend_from_models(value: &Value) -> OpenAiBackend {
+    if value["data"].as_array().is_some_and(|models| {
+        models
+            .iter()
+            .any(|m| matches!(m["owned_by"].as_str(), Some("llamacpp" | "llama.cpp")))
+    }) {
+        OpenAiBackend::LlamaCpp
+    } else {
+        OpenAiBackend::Standard
+    }
+}
+fn remember_backend(provider: &Provider, backend: OpenAiBackend) {
+    let mut cache = backend_cache().lock().unwrap();
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(backend_cache_key(provider), (Instant::now(), backend));
+}
+fn backend_cache_key(provider: &Provider) -> String {
+    format!(
+        "{}|{}",
+        provider.id,
+        normalize_base_url(&provider.protocol, &provider.base_url)
+    )
+}
+fn cached_backend(provider: &Provider) -> Option<OpenAiBackend> {
+    backend_cache()
+        .lock()
+        .unwrap()
+        .get(&backend_cache_key(provider))
+        .copied()
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(600))
+        .map(|(_, backend)| backend)
+}
+fn resolve_backend(provider: &Provider) -> OpenAiBackend {
+    if provider.backend != OpenAiBackend::Auto {
+        return provider.backend;
+    }
+    let base = normalize_base_url(&provider.protocol, &provider.base_url);
+    if let Some(backend) = cached_backend(provider) {
+        return backend;
+    }
+    // Probe the configured origin only, with the same credentials as model discovery.
+    // A short-lived failure falls back to the existing compatible API behavior.
+    let detected = (|| -> Result<OpenAiBackend> {
+        let response: Value = checked(
+            authorize(
+                Client::builder()
+                    .timeout(Duration::from_secs(2))
+                    .build()?
+                    .get(format!("{base}/models")),
+                provider,
+            )?
+            .send()?,
+        )?
+        .json()?;
+        Ok(backend_from_models(&response))
+    })()
+    .unwrap_or(OpenAiBackend::Standard);
+    remember_backend(provider, detected);
+    detected
 }
 
 pub fn messages(protocol: &Protocol, history: &[Message], prompt: &str) -> Result<Vec<Value>> {
@@ -278,7 +348,9 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
                 }
             }
             Protocol::OpenAi => {
-                if url.contains("openrouter.ai") {
+                if request.provider.backend == OpenAiBackend::LlamaCpp {
+                    body["chat_template_kwargs"] = json!({"enable_thinking":enabled});
+                } else if url.contains("openrouter.ai") {
                     body["reasoning"] = json!({"enabled":enabled});
                 } else if url.contains("deepseek.com") {
                     body["thinking"] = json!({"type":if enabled {"enabled"} else {"disabled"}});
@@ -319,6 +391,27 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
         .get(&request.conversation.model)
     {
         apply_parameters(&mut body, &config.parameters, &request.provider.protocol)?;
+    }
+    if request.provider.protocol == Protocol::OpenAi
+        && request.provider.backend == OpenAiBackend::LlamaCpp
+    {
+        if body.get("reasoning_format").is_none() {
+            body["reasoning_format"] = json!("deepseek");
+        }
+        if let Some(enabled) = request.settings.thinking {
+            if !body["chat_template_kwargs"].is_object() {
+                body["chat_template_kwargs"] = json!({});
+            }
+            body["chat_template_kwargs"]["enable_thinking"] = json!(enabled);
+            for key in [
+                "enable_thinking",
+                "reasoning_effort",
+                "reasoning",
+                "thinking",
+            ] {
+                body.as_object_mut().unwrap().remove(key);
+            }
+        }
     }
     if request.provider.protocol == Protocol::Anthropic {
         let max = body["max_tokens"]
@@ -672,9 +765,15 @@ fn stream(
     Ok(())
 }
 
-pub fn run(request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool>) {
+pub fn run(mut request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool>) {
     let outcome = (|| -> Result<()> {
         let _ = tx.send(Event::Status("正在连接模型…".into()));
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if request.provider.protocol == Protocol::OpenAi {
+            request.provider.backend = resolve_backend(&request.provider);
+        }
         let mut registry = ToolRegistry::load(&request.settings)?;
         let mut history = request.conversation.messages.clone();
         for message in &mut history {
@@ -836,6 +935,96 @@ mod tests {
     use super::*;
     use crate::test_support::{Response, server};
     #[test]
+    fn llama_backend_is_detected_and_explicit_toggle_wins_over_custom_parameters() {
+        for enabled in [false, true] {
+            let (url, requests, handle) = server(vec![
+                Response::json(json!({"data":[{"id":"qwen3.6-35b-a3b","owned_by":"llamacpp"}]})),
+                Response::sse(&[
+                    json!({"choices":[{"delta":{"reasoning_content":if enabled {"thinking"} else {""},"content":"2"}}]}),
+                    json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+                ]),
+            ]);
+            let mut req = request(Protocol::OpenAi, url);
+            req.provider.backend = OpenAiBackend::Auto;
+            req.conversation.model = "qwen3.6-35b-a3b".into();
+            req.settings.thinking = Some(enabled);
+            req.provider.model_configs.insert(req.conversation.model.clone(),ModelConfig {name:"千问".into(),parameters:serde_json::from_value(json!({"chat_template_kwargs":{"enable_thinking":!enabled,"preserve_thinking":true},"reasoning_effort":"none","enable_thinking":!enabled})).unwrap()});
+            let (tx, rx) = mpsc::channel();
+            run(req, tx, Arc::new(AtomicBool::new(false)));
+            let events: Vec<_> = rx.try_iter().collect();
+            assert!(!events.iter().any(|e| matches!(e, Event::Error(_))));
+            let (get, _) = requests.recv().unwrap();
+            assert!(get.starts_with("GET /models"));
+            let (_, body) = requests.recv().unwrap();
+            assert_eq!(body["chat_template_kwargs"]["enable_thinking"], enabled);
+            assert_eq!(body["chat_template_kwargs"]["preserve_thinking"], true);
+            assert_eq!(body["reasoning_format"], "deepseek");
+            assert!(body.get("enable_thinking").is_none());
+            assert!(body.get("reasoning_effort").is_none());
+            assert!(events.iter().any(|e|matches!(e,Event::Message(m) if m.content=="2" && m.reasoning==if enabled {"thinking"} else {""})));
+            handle.join().unwrap();
+        }
+    }
+    #[test]
+    fn llama_automatic_mode_preserves_custom_defaults_and_standard_backend_is_unchanged() {
+        let mut req = request(Protocol::OpenAi, "http://localhost".into());
+        req.provider.backend = OpenAiBackend::LlamaCpp;
+        req.settings.thinking = None;
+        req.settings.request_parameters = serde_json::from_value(
+            json!({"chat_template_kwargs":{"enable_thinking":false},"reasoning_format":"none"}),
+        )
+        .unwrap();
+        let value = body(&req, &[], &[]).unwrap();
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(value["reasoning_format"], "none");
+        req.settings.request_parameters.clear();
+        assert!(
+            body(&req, &[], &[])
+                .unwrap()
+                .get("chat_template_kwargs")
+                .is_none()
+        );
+        req.provider.backend = OpenAiBackend::Standard;
+        req.conversation.model = "qwen-plus".into();
+        req.settings.thinking = Some(false);
+        let value = body(&req, &[], &[]).unwrap();
+        assert_eq!(value["enable_thinking"], false);
+        assert!(value.get("chat_template_kwargs").is_none());
+        assert_eq!(resolve_backend(&req.provider), OpenAiBackend::Standard);
+    }
+    #[test]
+    #[ignore = "requires MORI_LLAMA_URL and MORI_LLAMA_MODEL; renders templates without inference"]
+    fn live_llama_thinking_template_switch() {
+        let url = std::env::var("MORI_LLAMA_URL").unwrap();
+        let model = std::env::var("MORI_LLAMA_MODEL").unwrap();
+        let mut req = request(Protocol::OpenAi, url.clone());
+        req.provider.backend = OpenAiBackend::Auto;
+        req.conversation.model = model;
+        req.provider.backend = resolve_backend(&req.provider);
+        assert_eq!(req.provider.backend, OpenAiBackend::LlamaCpp);
+        for enabled in [false, true] {
+            req.settings.thinking = Some(enabled);
+            let value = body(&req, &[], &[]).unwrap();
+            let root = url
+                .trim_end_matches('/')
+                .strip_suffix("/v1")
+                .unwrap_or(url.trim_end_matches('/'));
+            let response: Value = client()
+                .unwrap()
+                .post(format!("{root}/apply-template"))
+                .json(&value)
+                .send()
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .unwrap();
+            let prompt = response["prompt"].as_str().unwrap();
+            assert!(prompt.contains("<think>"));
+            assert_eq!(prompt.contains("</think>"), !enabled);
+        }
+    }
+    #[test]
     fn model_parameters_override_globals_and_follow_native_protocols() {
         for protocol in [Protocol::OpenAi, Protocol::Ollama, Protocol::Anthropic] {
             let mut req = request(protocol.clone(), "http://localhost".into());
@@ -908,6 +1097,7 @@ mod tests {
             id: id(),
             name: "Fixture".into(),
             protocol,
+            backend: OpenAiBackend::Standard,
             base_url,
             models: vec!["fixture".into()],
             model_configs: Default::default(),

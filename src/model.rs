@@ -19,12 +19,21 @@ pub enum Protocol {
     Ollama,
     Anthropic,
 }
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug, Default)]
+pub enum OpenAiBackend {
+    #[default]
+    Auto,
+    Standard,
+    LlamaCpp,
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Provider {
     pub id: String,
     pub name: String,
     pub protocol: Protocol,
+    #[serde(default)]
+    pub backend: OpenAiBackend,
     pub base_url: String,
     pub models: Vec<String>,
     #[serde(default)]
@@ -45,6 +54,7 @@ impl Provider {
             id: name.to_lowercase().replace(' ', "-"),
             name: name.into(),
             protocol,
+            backend: OpenAiBackend::Auto,
             base_url: url.into(),
             models: models.iter().map(|s| s.to_string()).collect(),
             model_configs: Default::default(),

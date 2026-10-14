@@ -30,6 +30,7 @@ pub struct Store {
     pub root: PathBuf,
     settings_snapshot: std::sync::Mutex<serde_json::Value>,
     models_snapshot: std::sync::Mutex<serde_json::Value>,
+    backends_snapshot: std::sync::Mutex<serde_json::Value>,
 }
 impl Store {
     fn at(root: PathBuf) -> Self {
@@ -39,6 +40,7 @@ impl Store {
                 serde_json::to_value(Settings::default()).expect("serialize preferences"),
             ),
             models_snapshot: std::sync::Mutex::new(serde_json::json!({})),
+            backends_snapshot: std::sync::Mutex::new(serde_json::json!({})),
         }
     }
     pub fn new() -> Result<Self> {
@@ -75,8 +77,12 @@ impl Store {
                 .extend(fields.clone());
         }
         let model_settings = value["settings"]["provider_model_configs"].clone();
+        let backend_settings = value["settings"]["provider_backends"].clone();
         let mut library: Library = serde_json::from_value(value)?;
         for provider in &mut library.providers {
+            if let Some(backend) = backend_settings.get(&provider.id) {
+                provider.backend = serde_json::from_value(backend.clone())?;
+            }
             if let Some(configs) = model_settings.get(&provider.id) {
                 let saved: std::collections::BTreeMap<String, ModelConfig> =
                     serde_json::from_value(configs.clone())?;
@@ -84,6 +90,7 @@ impl Store {
             }
         }
         *self.models_snapshot.lock().unwrap() = model_settings_value(&library)?;
+        *self.backends_snapshot.lock().unwrap() = backend_settings_value(&library)?;
         *self.settings_snapshot.lock().unwrap() = serde_json::to_value(&library.settings)?;
         if library.settings.parameter_version == 0 {
             if library.settings.max_tokens == 8192 {
@@ -134,9 +141,20 @@ impl Store {
                 }
             }
         }
+        let backends = backend_settings_value(library)?;
+        let mut backend_snapshot = self.backends_snapshot.lock().unwrap();
+        if !saved["provider_backends"].is_object() {
+            saved["provider_backends"] = serde_json::json!({});
+        }
+        for (pid, backend) in backends.as_object().unwrap() {
+            if backend_snapshot[pid] != *backend || saved["provider_backends"].get(pid).is_none() {
+                saved["provider_backends"][pid] = backend.clone();
+            }
+        }
         atomic_json(&preferences, &saved)?;
         *snapshot = current;
         *model_snapshot = models;
+        *backend_snapshot = backends;
         let path = self.root.join("library.json");
         if path.exists() {
             std::fs::copy(&path, self.root.join("library.backup.json"))?;
@@ -264,6 +282,13 @@ fn model_settings_value(library: &Library) -> Result<serde_json::Value> {
     }
     Ok(serde_json::Value::Object(models))
 }
+fn backend_settings_value(library: &Library) -> Result<serde_json::Value> {
+    let mut backends = serde_json::Map::new();
+    for provider in &library.providers {
+        backends.insert(provider.id.clone(), serde_json::to_value(provider.backend)?);
+    }
+    Ok(serde_json::Value::Object(backends))
+}
 fn atomic_json(path: &Path, value: &serde_json::Value) -> Result<()> {
     let temp = path.with_extension(format!("{}.tmp", id()));
     let result = (|| -> Result<()> {
@@ -341,15 +366,18 @@ mod tests {
         config
             .parameters
             .insert("top_p".into(), serde_json::json!(0.9));
+        library.providers[0].backend = OpenAiBackend::LlamaCpp;
         active.save(&library).unwrap();
         stale_store.save(&stale).unwrap();
         let mut old = serde_json::to_value(stale).unwrap();
         for provider in old["providers"].as_array_mut().unwrap() {
             provider.as_object_mut().unwrap().remove("model_configs");
+            provider.as_object_mut().unwrap().remove("backend");
         }
         std::fs::write(root.join("library.json"), serde_json::to_vec(&old).unwrap()).unwrap();
         let loaded = Store::at(root.clone()).load().unwrap();
         assert_eq!(loaded.providers[0].model_name("qwen3:8b"), "千问 · 日常");
+        assert_eq!(loaded.providers[0].backend, OpenAiBackend::LlamaCpp);
         assert_eq!(
             loaded.providers[0].model_configs["qwen3:8b"].parameters["top_p"],
             0.9

@@ -127,11 +127,14 @@ impl Mori {
     fn render_model_settings(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let provider = &self.library.providers[self.selected_provider];
         div().flex().flex_col().gap_3()
-            .child(div().flex().items_center().justify_between()
+            .child(div().flex().flex_wrap().gap_2().items_center().justify_between()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("模型与高级参数")))
-                .when(!self.model_editor,|d|d.child(button("add-model","添加模型","plus").on_click(cx.listener(|this,_,w,cx|this.edit_model("",w,cx))))) .when(self.model_editor,|d|d.child(Button::new("save-model-top").primary().label(tr("保存模型设置")).on_click(cx.listener(|this,_,_,cx|this.save_model(cx))))))
+                .when(!self.model_editor,|d|d.child(button("add-model","添加模型","plus").on_click(cx.listener(|this,_,w,cx|this.edit_model("",w,cx)))))
+                .when(self.model_editor,|d|d.child(div().flex().items_center().gap_2()
+                    .child(button("cancel-model-config","取消","x").on_click(cx.listener(|this,_,_,cx|{this.model_editor=false;cx.notify();})))
+                    .child(Button::new("save-model-top").primary().label(tr("保存模型设置")).on_click(cx.listener(|this,_,_,cx|this.save_model(cx)))))))
             .when(provider.models.is_empty(),|d|d.child(label("连接获取模型，或手动添加模型。",p.muted)))
-            .child(div().id("provider-model-list").flex().flex_col().gap_2().max_h(px(240.)).overflow_y_scroll().children(provider.models.iter().filter(|model|!self.model_editor || **model==self.editing_model).map(|model|{
+            .when(!self.model_editor,|d|d.child(div().id("provider-model-list").flex().flex_col().gap_2().max_h(px(240.)).overflow_y_scroll().children(provider.models.iter().map(|model|{
                 let edit=model.clone();let remove=model.clone();let shown=provider.model_name(model);
                 div().flex().items_center().gap_2().p_3().rounded_lg().bg(rgb(p.bg))
                     .child(div().flex_1().min_w_0().child(div().child(shown.clone()))
@@ -140,7 +143,7 @@ impl Mori {
                         .on_click(cx.listener(move|this,_,w,cx|this.edit_model(&edit,w,cx))))
                     .child(tiny(format!("remove-model-{model}"),"trash","移除模型")
                         .on_click(cx.listener(move|this,_,_,cx|{this.library.providers[this.selected_provider].models.retain(|m|m!=&remove);this.model_editor=false;this.persist();cx.notify();})))
-            })))
+            }))))
             .when(self.model_editor,|d|d.child(div().flex().flex_col().gap_4().p_4().border_1().border_color(rgb(p.line)).rounded_lg()
                 .child(field("模型 ID",Input::new(&self.model_id_input).disabled(!self.editing_model.is_empty()),p))
                 .child(field("显示名称（留空使用模型 ID）",Input::new(&self.model_name_input),p))
@@ -150,9 +153,7 @@ impl Mori {
                     .child(field("输出上限（tokens）",Input::new(&self.model_max_tokens),p).flex_1().min_w(px(150.))))
                 .child(label("采样参数留空使用服务商默认；输出留空不设置客户端上限。Claude 必须填写输出上限。",p.muted))
                 .child(field("更多参数（JSON）",Textarea::new(&self.model_parameters).font_family("Cascadia Code"),p))
-                .child(label("支持 top_k、seed、stop、惩罚、reasoning_effort，以及 options 等服务商原生嵌套参数。null 表示不发送该参数。",p.muted))
-                .child(div().flex().gap_2()
-                    .child(button("cancel-model-config","取消","x").on_click(cx.listener(|this,_,_,cx|{this.model_editor=false;cx.notify();}))))))
+                .child(label("支持 top_k、seed、stop、惩罚、reasoning_effort，以及 options 等服务商原生嵌套参数。null 表示不发送该参数。",p.muted))))
     }
     pub(super) fn set_language(
         &mut self,
@@ -388,6 +389,7 @@ impl Mori {
                             id: id(),
                             name: tr("自定义服务商"),
                             protocol: Protocol::OpenAi,
+                            backend: OpenAiBackend::Auto,
                             base_url: "https://api.example.com/v1".into(),
                             models: vec![],
                             model_configs: Default::default(),
@@ -409,17 +411,7 @@ impl Mori {
         let provider = &self.library.providers[self.selected_provider];
         let protocol = provider.protocol.clone();
         if self.model_editor {
-            return card(p)
-                .p_6()
-                .child(
-                    button("back-to-connection", "返回连接设置", "arrow-left").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.model_editor = false;
-                            cx.notify();
-                        }),
-                    ),
-                )
-                .child(self.render_model_settings(p, cx));
+            return card(p).p_6().child(self.render_model_settings(p, cx));
         }
         card(p)
             .p_6()
@@ -491,6 +483,32 @@ impl Mori {
                 p,
             ))
             .child(field("API Key", Input::new(&self.provider_key), p))
+            .when(protocol == Protocol::OpenAi, |d| {
+                d.child(field(
+                    "兼容后端",
+                    div().flex().flex_wrap().gap_2().children(
+                        [
+                            (OpenAiBackend::Auto, "自动识别"),
+                            (OpenAiBackend::Standard, "标准兼容"),
+                            (OpenAiBackend::LlamaCpp, "llama.cpp"),
+                        ]
+                        .into_iter()
+                        .map(|(backend, title)| {
+                            button(format!("backend-{backend:?}"), title, "server")
+                                .when(provider.backend == backend, |b| {
+                                    b.bg(rgb(p.soft)).text_color(rgb(p.accent))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.library.providers[this.selected_provider].backend =
+                                        backend;
+                                    this.persist();
+                                    cx.notify();
+                                }))
+                        }),
+                    ),
+                    p,
+                ))
+            })
             .child(self.render_model_settings(p, cx))
             .child(
                 div()

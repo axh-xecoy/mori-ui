@@ -80,6 +80,8 @@ Bash 默认在系统桌面目录执行，支持 Windows 桌面重定向；每次
 
 名称与参数同时保存在会话库和独立偏好中，防止旧版本重写会话库或过期实例退出时覆盖新配置；刷新模型列表不会清除其配置。旧回复没有独立模型标识时，以原会话的模型名称作为回退。
 
+OpenAI 兼容连接可选择「自动识别 / 标准兼容 / llama.cpp」。自动识别依据 `/models` 返回的 `owned_by`，按服务商与 URL 缓存 10 分钟；首次请求探测最多等待 2 秒，探测失败沿用标准兼容适配，也可手动指定后端。llama.cpp 的开关写入 `chat_template_kwargs.enable_thinking`，显式开启 / 关闭优先于高级 JSON 中冲突的思考参数；自动模式仍沿用自定义值与服务端默认。该后端默认请求 `reasoning_format: deepseek`，将思考内容返回到独立字段供界面折叠，自定义 `reasoning_format` 可覆盖此默认值。依据：[llama.cpp 服务端文档](https://github.com/ggml-org/llama.cpp/tree/master/tools/server#post-v1chatcompletions-openai-compatible-chat-completions-api)。
+
 图片、PDF、工具、图像生成和音频接口取决于所选服务商与模型。OpenAI 兼容服务商不一定提供图像和音频接口。音频输入是录音后转写，不是 Realtime 全双工语音；本地 PDF 文本提取不执行 OCR。当前没有实现账户云同步、向量知识库、原生网页搜索或 Responses API；可以通过 MCP 接入搜索与资料服务。
 
 停止按钮会立即结束界面接收并保留当前回复。阻塞 HTTP 连接会在下一段响应到来或超时后释放，未实现服务商后台任务的远程取消。当前一次运行一个生成请求，支持生成中查看其他会话。
@@ -96,7 +98,7 @@ cargo fmt --check
 
 测试使用本地 HTTP 模拟服务，覆盖三种服务商协议的完整流式请求、跨网络块的 UTF-8 / SSE、工具拒绝后的继续回复、异常断流、MCP 初始化 / 工具发现 / 执行 / 会话头、本地保存与备份。不会调用真实付费服务。
 
-界面验证使用 GPUI 自身的 `render_to_image`，不是网页仿制效果图。运行下列命令将输出 52 个实际界面状态，并自动检查重命名、删除、恢复、保存服务商提示、数学公式、设置分页、英文、小窗口、图片附件预览，以及输入框的 Enter / Ctrl+Enter / Shift+Enter 动作分发和侧栏鼠标拖动：
+界面验证使用 GPUI 自身的 `render_to_image`，不是网页仿制效果图。运行下列命令将输出 56 个实际界面状态，并自动检查重命名、删除、恢复、保存服务商提示、数学公式、设置分页、英文、小窗口、图片附件预览，以及输入框的 Enter / Ctrl+Enter / Shift+Enter 动作分发和侧栏鼠标拖动：
 
 ```powershell
 $env:MORI_DATA_DIR = "$PWD/.mori-visual"

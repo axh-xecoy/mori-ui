@@ -218,7 +218,7 @@ impl ToolRegistry {
             return Ok(this);
         }
         if settings.bash_enabled {
-            this.add("bash".into(), if settings.bash_trusted { "执行一条 Bash 命令；用户已启用信任调用。" } else { "执行一条 Bash 命令；每次都需用户确认。" }.into(), json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?;
+            this.add("bash".into(), format!("执行一条 Bash 命令；默认工作目录为系统桌面，可在命令中用 cd 切换目录。每次调用独立启动。{}", if settings.bash_trusted { "用户已启用信任调用。" } else { "每次都需用户确认。" }), json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?;
         }
         for f in settings.functions.iter().filter(|f| f.enabled) {
             this.add(
@@ -287,11 +287,13 @@ impl ToolRegistry {
         match self.targets.get(&call.name).context("工具不存在或未启用")? {
             Target::Bash => {
                 let command = args["command"].as_str().context("缺少 command")?;
-                run_process(
+                let desktop = desktop_directory()?;
+                run_process_in(
                     &settings.bash_path,
-                    &["-lc".into(), command.into()],
+                    &["-c".into(), command.into()],
                     None,
                     cancel,
+                    Some(&desktop),
                 )
             }
             Target::Function(f) => run_process(&f.command, &f.args, Some(&call.arguments), cancel),
@@ -404,7 +406,31 @@ fn run_process(
     input: Option<&str>,
     cancel: &AtomicBool,
 ) -> Result<String> {
-    let mut child = hidden_command(program)
+    run_process_in(program, args, input, cancel, None)
+}
+
+fn desktop_directory() -> Result<std::path::PathBuf> {
+    let desktop = directories::UserDirs::new()
+        .and_then(|dirs| dirs.desktop_dir().map(std::path::Path::to_path_buf))
+        .context("无法定位系统桌面目录")?;
+    if !desktop.is_dir() {
+        bail!("桌面目录不存在或不可访问：{}", desktop.display());
+    }
+    Ok(desktop)
+}
+
+fn run_process_in(
+    program: &str,
+    args: &[String],
+    input: Option<&str>,
+    cancel: &AtomicBool,
+    directory: Option<&std::path::Path>,
+) -> Result<String> {
+    let mut command = hidden_command(program);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -483,6 +509,72 @@ fn run_process(
 #[cfg(test)]
 mod output_tests {
     use super::*;
+
+    #[test]
+    fn bash_preserves_explicit_directory_with_spaces_and_unicode() {
+        let root = std::env::temp_dir().join(format!("Mori 桌面测试 {}", crate::model::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("marker.txt"), "fixture").unwrap();
+        #[cfg(windows)]
+        let bash = "C:/Program Files/Git/bin/bash.exe";
+        #[cfg(not(windows))]
+        let bash = "bash";
+        let output = run_process_in(
+            bash,
+            &[
+                "-c".into(),
+                "test -f marker.txt && printf 'correct-directory'".into(),
+            ],
+            None,
+            &AtomicBool::new(false),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(output.contains("correct-directory"), "{output}");
+        // Explicit cd remains possible within a call.
+        std::fs::create_dir(root.join("child")).unwrap();
+        let output = run_process_in(
+            bash,
+            &[
+                "-c".into(),
+                "cd child && test -f ../marker.txt && printf 'changed-directory'".into(),
+            ],
+            None,
+            &AtomicBool::new(false),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(output.contains("changed-directory"), "{output}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bash_tool_starts_in_the_actual_windows_desktop() {
+        let settings = Settings {
+            tools_enabled: true,
+            bash_enabled: true,
+            bash_path: "C:/Program Files/Git/bin/bash.exe".into(),
+            ..Settings::default()
+        };
+        let mut registry = ToolRegistry::load(&settings).unwrap();
+        let call = ToolCall {
+            name: "bash".into(),
+            arguments: r#"{"command":"pwd -W"}"#.into(),
+            ..ToolCall::default()
+        };
+        let output = registry
+            .execute(&call, &settings, &AtomicBool::new(false))
+            .unwrap();
+        let expected = desktop_directory()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(
+            output.to_lowercase().contains(&expected.to_lowercase()),
+            "{output}; expected {expected}"
+        );
+    }
 
     #[test]
     fn unicode_output_preserves_chinese_emoji_and_bom_encodings() {

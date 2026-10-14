@@ -218,7 +218,7 @@ impl ToolRegistry {
             return Ok(this);
         }
         if settings.bash_enabled {
-            this.add("bash".into(), "执行一条 Bash 命令；每次都需用户确认。".into(), json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?;
+            this.add("bash".into(), if settings.bash_trusted { "执行一条 Bash 命令；用户已启用信任调用。" } else { "执行一条 Bash 命令；每次都需用户确认。" }.into(), json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?;
         }
         for f in settings.functions.iter().filter(|f| f.enabled) {
             this.add(
@@ -273,6 +273,9 @@ impl ToolRegistry {
         self.schemas.push(json!({"type":"function","function":{"name":name,"description":description,"parameters":parameters}}));
         self.targets.insert(name, target);
         Ok(())
+    }
+    pub fn is_bash(&self, name: &str) -> bool {
+        matches!(self.targets.get(name), Some(Target::Bash))
     }
     pub fn execute(
         &mut self,

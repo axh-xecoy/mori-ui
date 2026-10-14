@@ -119,6 +119,8 @@ pub struct Message {
     #[serde(default)]
     pub reasoning: String,
     #[serde(default)]
+    pub thinking_blocks: Vec<Value>,
+    #[serde(default)]
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub tools: Vec<ToolCall>,
@@ -136,6 +138,7 @@ impl Message {
             role: role.into(),
             content: content.into(),
             reasoning: String::new(),
+            thinking_blocks: vec![],
             attachments: vec![],
             tools: vec![],
             tokens: 0,
@@ -258,6 +261,8 @@ pub struct Settings {
     pub tools_enabled: bool,
     pub bash_enabled: bool,
     pub bash_path: String,
+    pub bash_trusted: bool,
+    pub thinking: Option<bool>,
     pub mcp: Vec<McpConfig>,
     pub functions: Vec<FunctionConfig>,
     pub image_model: String,
@@ -276,6 +281,8 @@ impl Default for Settings {
             tools_enabled: false,
             bash_enabled: false,
             bash_path: "bash".into(),
+            bash_trusted: false,
+            thinking: None,
             mcp: vec![],
             functions: vec![],
             image_model: "gpt-image-1".into(),
@@ -318,5 +325,7 @@ mod tests {
         assert_eq!(settings.language, "zh-CN");
         assert!(!settings.send_on_enter);
         assert_eq!(settings.sidebar_width, 252.);
+        assert_eq!(settings.thinking, None);
+        assert!(!settings.bash_trusted);
     }
 }

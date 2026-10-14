@@ -148,48 +148,58 @@ impl Mori {
                                                     )),
                                             ),
                                     )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap_1()
-                                            .flex_shrink_0()
-                                            .child(
-                                                tiny(
-                                                    format!("rename-{}", c.id),
-                                                    "pencil",
-                                                    "重命名会话",
+                                    .child({
+                                        let view = cx.entity().downgrade();
+                                        let locked = self
+                                            .generation
+                                            .as_ref()
+                                            .is_some_and(|g| g.conversation == c.id)
+                                            || self.media_busy;
+                                        Button::new(format!("conversation-menu-{}", c.id))
+                                            .ghost()
+                                            .icon(icon("ellipsis"))
+                                            .size(px(28.))
+                                            .text_color(rgb(p.muted))
+                                            .on_click(|_, _, cx| cx.stop_propagation())
+                                            .dropdown_menu(move |menu, _, _| {
+                                                let rename_view = view.clone();
+                                                let rename_id = rename_id.clone();
+                                                let delete_view = view.clone();
+                                                let delete_id = delete_id.clone();
+                                                menu.item(
+                                                    PopupMenuItem::new(tr("重命名"))
+                                                        .icon(icon("pencil"))
+                                                        .on_click(move |_, w, cx| {
+                                                            let _ = rename_view.update(
+                                                                cx,
+                                                                |this, cx| {
+                                                                    this.rename_conversation(
+                                                                        rename_id.clone(),
+                                                                        w,
+                                                                        cx,
+                                                                    )
+                                                                },
+                                                            );
+                                                        }),
                                                 )
-                                                .size(px(24.))
-                                                .text_color(rgb(p.muted))
-                                                .on_click(cx.listener(move |this, _, w, cx| {
-                                                    cx.stop_propagation();
-                                                    this.rename_conversation(
-                                                        rename_id.clone(),
-                                                        w,
-                                                        cx,
-                                                    );
-                                                })),
-                                            )
-                                            .child(
-                                                tiny(
-                                                    format!("delete-{}", c.id),
-                                                    "trash",
-                                                    "删除会话",
+                                                .separator()
+                                                .item(
+                                                    PopupMenuItem::new(tr("删除会话"))
+                                                        .icon(icon("trash"))
+                                                        .disabled(locked)
+                                                        .on_click(move |_, w, cx| {
+                                                            let _ = delete_view.update(
+                                                                cx,
+                                                                |this, cx| {
+                                                                    this.delete_conversation(
+                                                                        &delete_id, w, cx,
+                                                                    )
+                                                                },
+                                                            );
+                                                        }),
                                                 )
-                                                .size(px(24.))
-                                                .text_color(rgb(p.muted))
-                                                .disabled(
-                                                    self.generation
-                                                        .as_ref()
-                                                        .is_some_and(|g| g.conversation == c.id)
-                                                        || self.media_busy,
-                                                )
-                                                .on_click(cx.listener(move |this, _, w, cx| {
-                                                    cx.stop_propagation();
-                                                    this.delete_conversation(&delete_id, w, cx);
-                                                })),
-                                            ),
-                                    ),
+                                            })
+                                    }),
                             )
                     })),
             )
@@ -397,16 +407,27 @@ impl Mori {
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child("Mori"),
                                 )
-                                .when(!user && m.elapsed_ms > 0, |d| {
-                                    d.child(label(
-                                        format!(
-                                            "{:.1}s · {} tokens",
-                                            m.elapsed_ms as f64 / 1000.,
-                                            m.tokens
-                                        ),
-                                        p.muted,
-                                    ))
-                                }),
+                                .when(
+                                    !user
+                                        && m.elapsed_ms > 0
+                                        && !self.generation.as_ref().is_some_and(|g| {
+                                            self.current().is_some_and(|c| c.id == g.conversation)
+                                                && self
+                                                    .current()
+                                                    .and_then(|c| c.messages.last())
+                                                    .is_some_and(|last| last.id == m.id)
+                                        }),
+                                    |d| {
+                                        d.child(label(
+                                            format!(
+                                                "{:.1}s · {} tokens",
+                                                m.elapsed_ms as f64 / 1000.,
+                                                m.tokens
+                                            ),
+                                            p.muted,
+                                        ))
+                                    },
+                                ),
                         )
                     })
                     .when(!m.reasoning.is_empty(), |d| {
@@ -587,7 +608,21 @@ impl Mori {
                                         move |this, _, _, cx| this.speak(speak_text.clone(), cx),
                                     )),
                                 )
-                            }),
+                            })
+                            .when(
+                                !user
+                                    && self
+                                        .current()
+                                        .and_then(|c| c.messages.last())
+                                        .is_some_and(|last| last.id == m.id),
+                                |d| {
+                                    d.child(
+                                        tiny(format!("retry-{}", m.id), "refresh-cw", "重新生成")
+                                            .disabled(self.generation.is_some() || self.media_busy)
+                                            .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+                                    )
+                                },
+                            ),
                     ),
             )
     }
@@ -755,6 +790,8 @@ impl Mori {
                             .flex()
                             .items_center()
                             .justify_between()
+                            .flex_wrap()
+                            .gap_2()
                             .mt_2()
                             .child(
                                 div()
@@ -815,6 +852,46 @@ impl Mori {
                                             }),
                                         ),
                                     )
+                                    .child({
+                                        let view = cx.entity().downgrade();
+                                        let mode = self.library.settings.thinking;
+                                        button(
+                                            "thinking-mode",
+                                            match mode {
+                                                None => "思考：自动",
+                                                Some(true) => "思考：开启",
+                                                Some(false) => "思考：关闭",
+                                            },
+                                            "brain",
+                                        )
+                                        .disabled(busy || self.image_mode)
+                                        .dropdown_menu(
+                                            move |mut menu, _, _| {
+                                                for (value, title) in [
+                                                    (None, "思考：自动"),
+                                                    (Some(true), "思考：开启"),
+                                                    (Some(false), "思考：关闭"),
+                                                ] {
+                                                    let view = view.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(tr(title))
+                                                            .checked(mode == value)
+                                                            .on_click(move |_, _, cx| {
+                                                                let _ =
+                                                                    view.update(cx, |this, cx| {
+                                                                        this.library
+                                                                            .settings
+                                                                            .thinking = value;
+                                                                        this.persist();
+                                                                        cx.notify();
+                                                                    });
+                                                            }),
+                                                    );
+                                                }
+                                                menu
+                                            },
+                                        )
+                                    })
                                     .child(
                                         button(
                                             "toggle-tools",
@@ -838,6 +915,7 @@ impl Mori {
                                     .flex()
                                     .items_center()
                                     .gap_3()
+                                    .ml_auto()
                                     .child(label(
                                         if self.library.settings.send_on_enter {
                                             "Enter 发送 · Shift+Enter 换行"
@@ -867,13 +945,12 @@ impl Mori {
                             ),
                     ),
             )
-            .when(!self.status.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_center()
-                        .child(label(self.status.clone(), p.muted)),
-                )
-            })
+            .child(
+                div()
+                    .h(px(20.))
+                    .text_center()
+                    .child(label(self.status.clone(), p.muted)),
+            )
             .when(self.transcript.is_some(), |d| {
                 d.child(
                     button("insert-transcript", "插入音频转写", "text-cursor-input").on_click(
@@ -1048,45 +1125,17 @@ impl Mori {
                                                     .enumerate()
                                                     .map(|(i, m)| self.render_message(m, i, p, cx)),
                                             )
-                                            .when(
-                                                self.generation.is_some()
-                                                    && self.approval.is_none(),
-                                                |d| {
-                                                    d.child(
-                                                        div()
-                                                            .py_4()
-                                                            .text_sm()
-                                                            .text_color(rgb(p.accent))
-                                                            .child(tr("●  Mori 正在思考…")),
-                                                    )
-                                                },
-                                            )
                                             .child(
                                                 div()
+                                                    .h(px(40.))
                                                     .flex()
-                                                    .justify_end()
-                                                    .gap_2()
-                                                    .pb_3()
-                                                    .child(
-                                                        button("retry", "重新生成", "refresh-cw")
-                                                            .disabled(
-                                                                self.generation.is_some()
-                                                                    || self.media_busy,
-                                                            )
-                                                            .on_click(cx.listener(
-                                                                |this, _, _, cx| this.retry(cx),
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        tiny(
-                                                            "to-bottom",
-                                                            "arrow-down",
-                                                            "跳转到最新消息",
-                                                        )
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.scroll.scroll_to_bottom();
-                                                            cx.notify();
-                                                        })),
+                                                    .items_center()
+                                                    .text_sm()
+                                                    .text_color(rgb(p.accent))
+                                                    .when(
+                                                        self.generation.is_some()
+                                                            && self.approval.is_none(),
+                                                        |d| d.child(tr("●  Mori 正在回复…")),
                                                     ),
                                             ),
                                     )

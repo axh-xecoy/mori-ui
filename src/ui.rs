@@ -20,6 +20,7 @@ use gpui_kit::component::{
     Disableable, Icon, Sizable, Theme, ThemeMode,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    menu::{DropdownMenu, PopupMenuItem},
     text::TextView,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -142,6 +143,7 @@ pub struct Mori {
     status: String,
     transcript: Option<String>,
     scroll: ScrollHandle,
+    follow_stream_offset: Option<Pixels>,
     work_tx: mpsc::Sender<Work>,
     work_rx: mpsc::Receiver<Work>,
     media_busy: bool,
@@ -405,6 +407,7 @@ impl Mori {
             status: String::new(),
             transcript: None,
             scroll: ScrollHandle::new(),
+            follow_stream_offset: None,
             work_tx,
             work_rx,
             media_busy: false,
@@ -442,7 +445,7 @@ impl Mori {
         cx.spawn(async move |entity, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(50))
+                    .timer(Duration::from_millis(80))
                     .await;
                 if entity.update(cx, |this, cx| this.poll(cx)).is_err() {
                     break;
@@ -880,7 +883,12 @@ impl Mori {
         cx.notify();
     }
     fn poll(&mut self, cx: &mut Context<Self>) {
-        let follow = (self.scroll.offset().y + self.scroll.max_offset().y).abs() < px(100.);
+        let offset = self.scroll.offset().y;
+        // Markdown can measure a second frame after its source changes. Keep the
+        // bottom anchored across that frame until the reader scrolls upward.
+        let distance = (offset + self.scroll.max_offset().y).abs();
+        let follow =
+            distance < px(32.) || self.follow_stream_offset.is_some_and(|last| offset <= last);
         if self
             .draft_dirty
             .is_some_and(|t| t.elapsed() > Duration::from_millis(800))
@@ -1056,10 +1064,16 @@ impl Mori {
                 }
             }
         }
-        if changed {
-            if follow && cid == self.library.active_id && self.page == Page::Chat {
+        if follow && cid.is_some() && cid == self.library.active_id && self.page == Page::Chat {
+            self.follow_stream_offset = Some(offset);
+            if changed || distance > px(1.) {
                 self.scroll.scroll_to_bottom();
+                changed = true;
             }
+        } else {
+            self.follow_stream_offset = None;
+        }
+        if changed {
             cx.notify();
         }
     }

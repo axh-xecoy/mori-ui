@@ -14,7 +14,7 @@ pub fn start(
     });
     cx.spawn(async move |cx| {
         let input_only=std::env::var_os("MORI_INPUT_CHECK_ONLY").is_some();
-        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact"].into_iter().enumerate().filter(|(stage,_)| !input_only||*stage==19) {
+        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu"].into_iter().enumerate().filter(|(stage,_)| !input_only||*stage==19) {
             let _ = handle.update(cx, |_, window, cx| {
                 view.update(cx, |this, cx| {
                     this.page = Page::Chat; this.model_picker = false; this.library.settings.dark = false;
@@ -92,12 +92,29 @@ pub fn start(
                         },
                         20 => {assert_eq!(this.attachments.len(),2);assert!(this.attachments.iter().any(|a|a.mime.starts_with("image/")));this.library.settings.sidebar_width=360.;},
                         21 => {window.resize(size(px(900.),px(640.)));this.page=Page::Settings;this.settings_tab=SettingsTab::General;},
-                        22 => {this.page=Page::Settings;this.settings_tab=SettingsTab::Connections;this.provider_picker=false;}, _ => {}
+                        22 => {this.page=Page::Settings;this.settings_tab=SettingsTab::Connections;this.provider_picker=false;},
+                        23 => {
+                            window.resize(size(px(1280.),px(860.))); this.library.settings.sidebar_width=252.;this.set_language("zh-CN",window,cx);
+                            this.new_chat(window,cx);this.toast=None;this.attachments.clear();this.library.settings.thinking=Some(true);
+                            let c=this.current_mut().unwrap();c.title="让回复平稳展开".into();c.model="qwen3.6:35b".into();
+                            c.messages.push(Message::new("user","帮我安排一个轻松的周末。"));
+                            let mut reply=Message::new("assistant","可以先给自己留一段空白的时间。\n\n### 周末计划\n\n- 周六早上：去公园散步。");reply.reasoning="考虑放松、出行和休息之间的平衡。".into();reply.elapsed_ms=3800;c.messages.push(reply);
+                            let conversation=c.id.clone(); let (_,rx)=mpsc::channel();this.generation=Some(Generation {conversation,rx,cancel:Arc::new(AtomicBool::new(false))});this.status="正在回复…".into();
+                        },
+                        24 => {let c=this.current_mut().unwrap();let reply=c.messages.last_mut().unwrap();reply.content.push_str("\n- 周六下午：在家读一章书。\n- 周日：给喜欢的人做一顿饭。\n\n不用安排得太满，休息也是计划的一部分。");reply.elapsed_ms=8900;reply.tokens=215;},
+                        25 => {this.generation=None;this.status.clear();let c=this.current().unwrap().clone();this.library.conversations=vec![c];},
+                        26 => {}, _ => {}
                     }
                     Theme::change(if this.library.settings.dark {ThemeMode::Dark} else {ThemeMode::Light},Some(window),cx);
                     Mori::tint(cx,this.library.settings.dark); cx.notify();
                 });
                 let _ = window.draw(cx);
+                if stage==25 || stage==26 {
+                    if stage==26 { window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),cx); }
+                    let position=if stage==25 {point(px(210.),px(400.))} else {point(px(545.),px(760.))};
+                    window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+                    window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+                }
             });
             cx.background_executor().timer(Duration::from_millis(600)).await;
             let path=directory.join(format!("{name}.png"));
@@ -148,6 +165,28 @@ pub fn start(
         cx.background_executor().timer(Duration::from_millis(100)).await;
         let result=handle.update(cx,|_,_,cx|view.update(cx,|this,_|{assert_eq!(this.library.settings.sidebar_width,340.);assert!(!this.resizing_sidebar);}));
         eprintln!("sidebar drag regression: {result:?}");
+        let (stream_tx,mut reply)=handle.update(cx,|_,window,cx|{let result=view.update(cx,|this,cx| {
+            this.page=Page::Chat;this.model_picker=false;this.rename=false;
+            let c=this.current_mut().unwrap();c.messages.clear();
+            let reply=Message::new("assistant","A stable paragraph.\n\n".repeat(100));c.messages.push(reply.clone());
+            let conversation=c.id.clone();let (tx,rx)=mpsc::channel();this.generation=Some(Generation {conversation,rx,cancel:Arc::new(AtomicBool::new(false))});
+            this.scroll.scroll_to_bottom();cx.notify();(tx,reply)
+        });let _=window.draw(cx);result}).unwrap();
+        cx.background_executor().timer(Duration::from_millis(100)).await;
+        let _=handle.update(cx,|_,_,cx|{let scroll=&view.read(cx).scroll;eprintln!("before stream offset={:?} max={:?}",scroll.offset(),scroll.max_offset());});
+        reply.content.push_str("Another paragraph.\n\n");stream_tx.send(Event::Message(reply.clone())).unwrap();
+        let _=handle.update(cx,|_,window,cx|{view.update(cx,|this,cx|this.poll(cx));let _=window.draw(cx);});
+        cx.background_executor().timer(Duration::from_millis(100)).await;
+        let offset=handle.update(cx,|_,window,cx|{view.update(cx,|this,cx| {
+            eprintln!("after stream offset={:?} max={:?}",this.scroll.offset(),this.scroll.max_offset());
+            assert!((this.scroll.offset().y+this.scroll.max_offset().y).abs()<px(2.),"Streaming must follow the bottom after layout");
+            this.scroll.set_offset(point(px(0.),px(-80.)));cx.notify();
+        });let _=window.draw(cx);view.read(cx).scroll.offset()}).unwrap();
+        reply.content.push_str("A later paragraph.\n\n");stream_tx.send(Event::Message(reply)).unwrap();
+        let _=handle.update(cx,|_,window,cx|{view.update(cx,|this,cx|this.poll(cx));let _=window.draw(cx);});
+        cx.background_executor().timer(Duration::from_millis(100)).await;
+        let result=handle.update(cx,|_,_,cx|view.update(cx,|this,_|{assert_eq!(this.scroll.offset(),offset,"Streaming must not pull readers away from older messages");this.generation=None;}));
+        eprintln!("streaming scroll regression: {result:?}");
         cx.update(|cx|cx.quit());
     }).detach();
 }

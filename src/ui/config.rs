@@ -45,7 +45,14 @@ impl Mori {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(tr("本机命令")),
                     )
-                    .child(label("需要时才开启，每次执行前确认", p.muted))
+                    .child(label(
+                        if settings.bash_trusted {
+                            "信任模式：自动执行 Bash 调用"
+                        } else {
+                            "每次执行前确认"
+                        },
+                        p.muted,
+                    ))
                     .child(
                         button(
                             "enable-bash",
@@ -60,6 +67,25 @@ impl Mori {
                         .on_click(cx.listener(|this, _, w, cx| {
                             this.library.settings.bash_enabled =
                                 !this.library.settings.bash_enabled;
+                            this.load_advanced(w, cx);
+                            this.persist();
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        button(
+                            "trust-bash",
+                            if settings.bash_trusted {
+                                "信任调用：开启"
+                            } else {
+                                "信任调用：关闭"
+                            },
+                            "shield",
+                        )
+                        .disabled(!settings.bash_enabled)
+                        .on_click(cx.listener(|this, _, w, cx| {
+                            this.library.settings.bash_trusted =
+                                !this.library.settings.bash_trusted;
                             this.load_advanced(w, cx);
                             this.persist();
                             cx.notify();

@@ -109,3 +109,11 @@ Remove-Item Env:MORI_SNAPSHOT_DIR
 - `src/model.rs`：可序列化的数据模型。
 
 框架：[GPUI Kit](https://github.com/longbridge/gpui-kit)。接口遵循 [Ollama](https://docs.ollama.com/api/chat)、[OpenAI](https://developers.openai.com/api/reference/resources/chat)、[Anthropic](https://platform.claude.com/docs/en/api/messages) 和 [MCP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) 文档。
+
+### 思考与工具信任
+
+输入框下方的思考菜单支持自动、开启和关闭；自动保持服务商默认。Ollama、DeepSeek、Qwen / SiliconFlow、OpenRouter、Claude 和部分 OpenAI 模型分别使用对应参数，强制思考的模型不能保证关闭。未适配的服务商会提示切回自动，不用隐藏思考过程冒充关闭。
+
+在“工具与扩展”中启用 Bash 后，可选择信任调用，随后 Bash 命令无需逐次确认。默认关闭；MCP 与自定义函数仍需确认，命令在本机直接执行。流式显示约每 80ms 合并更新，状态区域预留高度，生成期间隐藏不停变化的耗时和 token 统计。
+
+接口参考：[Ollama](https://github.com/ollama/ollama/blob/main/docs/openapi.yaml)、[Qwen](https://help.aliyun.com/zh/model-studio/deep-thinking/)、[DeepSeek](https://api-docs.deepseek.com/guides/thinking_mode/)、[OpenAI](https://developers.openai.com/api/docs/guides/reasoning)、[Claude](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)、[OpenRouter](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)。

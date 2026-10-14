@@ -172,6 +172,9 @@ pub fn messages(protocol: &Protocol, history: &[Message], prompt: &str) -> Resul
                     }
                 }
                 let mut item = json!({"role":message.role,"content":if content.len()==1 { content[0]["text"].clone() } else { json!(content) }});
+                if !message.reasoning.is_empty() {
+                    item["reasoning_content"] = json!(message.reasoning);
+                }
                 if !message.tools.is_empty() {
                     item["tool_calls"] = json!(message.tools.iter().map(|t| json!({"id":t.id,"type":"function","function":{"name":t.name,"arguments":t.arguments}})).collect::<Vec<_>>());
                 }
@@ -183,7 +186,7 @@ pub fn messages(protocol: &Protocol, history: &[Message], prompt: &str) -> Resul
                 }
             }
             Protocol::Anthropic => {
-                let mut content = vec![];
+                let mut content = message.thinking_blocks.clone();
                 if !text.is_empty() {
                     content.push(json!({"type":"text","text":text}));
                 }
@@ -248,6 +251,54 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
             }
         }
     }
+    if let Some(enabled) = request.settings.thinking {
+        let url = request.provider.base_url.to_lowercase();
+        let model = request.conversation.model.to_lowercase();
+        match request.provider.protocol {
+            Protocol::Ollama => body["think"] = json!(enabled),
+            Protocol::Anthropic => {
+                if enabled {
+                    if model.contains("4-6") || model.contains("4-7") {
+                        body["thinking"] = json!({"type":"adaptive"});
+                    } else {
+                        if request.settings.max_tokens < 2048 {
+                            bail!("开启思考需要至少 2048 个输出 token");
+                        }
+                        body["thinking"] = json!({"type":"enabled","budget_tokens":(request.settings.max_tokens / 2).clamp(1024, 4096)});
+                    }
+                    body.as_object_mut().unwrap().remove("temperature");
+                } else {
+                    body["thinking"] = json!({"type":"disabled"});
+                }
+            }
+            Protocol::OpenAi => {
+                if url.contains("openrouter.ai") {
+                    body["reasoning"] = json!({"enabled":enabled});
+                } else if url.contains("deepseek.com") {
+                    body["thinking"] = json!({"type":if enabled {"enabled"} else {"disabled"}});
+                } else if model.contains("qwen")
+                    || url.contains("dashscope")
+                    || url.contains("siliconflow")
+                {
+                    body["enable_thinking"] = json!(enabled);
+                } else if model.starts_with("gpt-5.1") || model.starts_with("gpt-5.2") {
+                    body["reasoning_effort"] = json!(if enabled { "medium" } else { "none" });
+                } else if model.starts_with("o1")
+                    || model.starts_with("o3")
+                    || model.starts_with("o4")
+                    || model.starts_with("gpt-5")
+                    || model.starts_with("gpt-6")
+                {
+                    if !enabled {
+                        bail!("此模型无法保证关闭思考，请选择支持非思考模式的模型或使用自动模式");
+                    }
+                    body["reasoning_effort"] = json!("medium");
+                } else {
+                    bail!("当前模型或服务商尚未适配思考开关，请使用自动模式或选择支持的模型");
+                }
+            }
+        }
+    }
     if !tools.is_empty() && request.provider.protocol != Protocol::Anthropic {
         body["tools"] = json!(tools);
     }
@@ -259,6 +310,7 @@ struct Accumulator {
     calls: std::collections::BTreeMap<usize, ToolCall>,
     output: String,
     reasoning: String,
+    thinking_blocks: std::collections::BTreeMap<usize, Value>,
     tokens: u64,
     finished: bool,
 }
@@ -330,6 +382,12 @@ impl Accumulator {
                 match value["type"].as_str().unwrap_or("") {
                     "content_block_start" => {
                         let block = &value["content_block"];
+                        if matches!(
+                            block["type"].as_str(),
+                            Some("thinking" | "redacted_thinking")
+                        ) {
+                            self.thinking_blocks.insert(index, block.clone());
+                        }
                         if block["type"] == "tool_use" {
                             self.calls.insert(
                                 index,
@@ -347,6 +405,15 @@ impl Accumulator {
                     }
                     "content_block_delta" => {
                         let delta = &value["delta"];
+                        if let Some(block) = self.thinking_blocks.get_mut(&index) {
+                            for key in ["thinking", "signature"] {
+                                if let Some(part) = delta[key].as_str() {
+                                    let mut text = block[key].as_str().unwrap_or("").to_string();
+                                    text.push_str(part);
+                                    block[key] = json!(text);
+                                }
+                            }
+                        }
                         self.output.push_str(delta["text"].as_str().unwrap_or(""));
                         self.reasoning
                             .push_str(delta["thinking"].as_str().unwrap_or(""));
@@ -371,6 +438,7 @@ impl Accumulator {
     fn apply(&self, message: &mut Message) {
         message.content.clone_from(&self.output);
         message.reasoning.clone_from(&self.reasoning);
+        message.thinking_blocks = self.thinking_blocks.values().cloned().collect();
         message.tools = self
             .calls
             .values()
@@ -415,6 +483,7 @@ fn stream(
     let start = Instant::now();
     let mut accumulator = Accumulator::default();
     let mut data = String::new();
+    let mut published = Instant::now() - Duration::from_millis(80);
     for line in BufReader::new(response).lines() {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
@@ -448,8 +517,11 @@ fn stream(
             )?;
             accumulator.apply(message);
             message.elapsed_ms = start.elapsed().as_millis() as u64;
-            if tx.send(Event::Message(message.clone())).is_err() {
-                return Ok(());
+            if published.elapsed() >= Duration::from_millis(80) {
+                if tx.send(Event::Message(message.clone())).is_err() {
+                    return Ok(());
+                }
+                published = Instant::now();
             }
         }
     }
@@ -498,18 +570,23 @@ pub fn run(request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool>) {
                 return Ok(());
             }
             for i in 0..message.tools.len() {
-                let (approval_tx, approval_rx) = mpsc::channel();
-                tx.send(Event::Approval(message.tools[i].clone(), approval_tx))?;
-                let approved = loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    match approval_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(v) => break v,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                        Err(_) => {}
-                    }
-                };
+                let approved =
+                    if request.settings.bash_trusted && registry.is_bash(&message.tools[i].name) {
+                        true
+                    } else {
+                        let (approval_tx, approval_rx) = mpsc::channel();
+                        tx.send(Event::Approval(message.tools[i].clone(), approval_tx))?;
+                        loop {
+                            if cancel.load(Ordering::Relaxed) {
+                                return Ok(());
+                            }
+                            match approval_rx.recv_timeout(Duration::from_millis(100)) {
+                                Ok(v) => break v,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                                Err(_) => {}
+                            }
+                        }
+                    };
                 let output = if approved {
                     registry
                         .execute(&message.tools[i], &request.settings, &cancel)
@@ -743,45 +820,165 @@ mod tests {
     }
     #[test]
     fn denied_tool_is_returned_to_model_before_followup() {
+        for trust_non_bash in [false, true] {
+            let (url, requests, handle) = server(vec![
+                Response::sse(&[
+                    json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"bash","arguments":"{\"command\":\"echo hello\"}"}}]},"finish_reason":"tool_calls"}]}),
+                ]),
+                Response::sse(&[
+                    json!({"choices":[{"delta":{"content":"无需执行工具也可以继续。"},"finish_reason":"stop"}]}),
+                ]),
+            ]);
+            let mut req = request(Protocol::OpenAi, url);
+            req.settings.tools_enabled = true;
+            req.settings.bash_enabled = !trust_non_bash;
+            req.settings.bash_trusted = trust_non_bash;
+            if trust_non_bash {
+                req.settings.functions.push(FunctionConfig {
+                    name: "bash".into(),
+                    description: "A custom tool with a misleading name".into(),
+                    parameters: json!({"type":"object"}),
+                    command: "must-never-execute".into(),
+                    args: vec![],
+                    enabled: true,
+                });
+            }
+            let (tx, rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || run(req, tx, Arc::new(AtomicBool::new(false))));
+            let mut saw_approval = false;
+            let mut final_text = String::new();
+            loop {
+                match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                    Event::Approval(call, tx) => {
+                        assert_eq!(call.name, "bash");
+                        saw_approval = true;
+                        tx.send(false).unwrap();
+                    }
+                    Event::Error(e) => panic!("{e}"),
+                    Event::Message(m) => final_text = m.content,
+                    Event::Done => break,
+                    _ => {}
+                }
+            }
+            assert!(saw_approval);
+            assert_eq!(final_text, "无需执行工具也可以继续。");
+            let _ = requests.recv().unwrap();
+            let (_, body) = requests.recv().unwrap();
+            let msgs = body["messages"].as_array().unwrap();
+            assert_eq!(msgs.last().unwrap()["role"], "tool");
+            assert!(
+                msgs.last().unwrap()["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("拒绝")
+            );
+            worker.join().unwrap();
+            handle.join().unwrap();
+        }
+    }
+    #[test]
+    fn thinking_controls_follow_provider_protocol_and_auto_keeps_old_requests() {
+        let mut req = request(Protocol::Ollama, "http://localhost:11434".into());
+        assert!(body(&req, &[], &[]).unwrap().get("think").is_none());
+        for enabled in [true, false] {
+            req.settings.thinking = Some(enabled);
+            assert_eq!(body(&req, &[], &[]).unwrap()["think"], enabled);
+            req.provider.protocol = Protocol::OpenAi;
+            req.provider.base_url = "https://api.deepseek.com".into();
+            assert_eq!(
+                body(&req, &[], &[]).unwrap()["thinking"]["type"],
+                if enabled { "enabled" } else { "disabled" }
+            );
+            req.provider.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".into();
+            assert_eq!(body(&req, &[], &[]).unwrap()["enable_thinking"], enabled);
+            req.provider.base_url = "https://openrouter.ai/api/v1".into();
+            assert_eq!(
+                body(&req, &[], &[]).unwrap()["reasoning"]["enabled"],
+                enabled
+            );
+            req.provider.base_url = "https://api.openai.com/v1".into();
+            req.conversation.model = "gpt-5.1".into();
+            assert_eq!(
+                body(&req, &[], &[]).unwrap()["reasoning_effort"],
+                if enabled { "medium" } else { "none" }
+            );
+            req.provider.protocol = Protocol::Ollama;
+        }
+        req.provider.protocol = Protocol::OpenAi;
+        req.conversation.model = "o3".into();
+        assert!(
+            body(&req, &[], &[]).is_err(),
+            "Never silently claim to disable an always-thinking model"
+        );
+        req.provider.protocol = Protocol::Anthropic;
+        req.settings.thinking = Some(true);
+        req.conversation.model = "claude-sonnet-4-5".into();
+        let value = body(&req, &[], &[]).unwrap();
+        assert_eq!(value["thinking"]["budget_tokens"], 4096);
+        assert!(value.get("temperature").is_none());
+        req.settings.max_tokens = 1000;
+        assert!(body(&req, &[], &[]).is_err());
+    }
+    #[test]
+    fn claude_signed_thinking_survives_stream_and_tool_continuation() {
+        let mut accumulator = Accumulator::default();
+        for value in [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Think carefully"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed-value"}}),
+        ] {
+            accumulator.ingest(&Protocol::Anthropic, value).unwrap();
+        }
+        let mut message = Message::new("assistant", "");
+        accumulator.apply(&mut message);
+        message.tools.push(ToolCall {
+            id: "call".into(),
+            name: "lookup".into(),
+            arguments: "{}".into(),
+            result: Some("found".into()),
+        });
+        let decoded: Message =
+            serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+        let history = messages(&Protocol::Anthropic, &[decoded], "").unwrap();
+        assert_eq!(history[0]["content"][0]["thinking"], "Think carefully");
+        assert_eq!(history[0]["content"][0]["signature"], "signed-value");
+        assert_eq!(history[0]["content"][1]["type"], "tool_use");
+    }
+    #[test]
+    fn trusted_bash_skips_confirmation_and_returns_real_output_to_model() {
         let (url, requests, handle) = server(vec![
             Response::sse(&[
-                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"bash","arguments":"{\"command\":\"echo hello\"}"}}]},"finish_reason":"tool_calls"}]}),
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"trusted","function":{"name":"bash","arguments":"{\"command\":\"echo trusted-output\"}"}}]},"finish_reason":"tool_calls"}]}),
             ]),
             Response::sse(&[
-                json!({"choices":[{"delta":{"content":"无需执行工具也可以继续。"},"finish_reason":"stop"}]}),
+                json!({"choices":[{"delta":{"content":"Finished"},"finish_reason":"stop"}]}),
             ]),
         ]);
         let mut req = request(Protocol::OpenAi, url);
         req.settings.tools_enabled = true;
         req.settings.bash_enabled = true;
+        req.settings.bash_trusted = true;
+        #[cfg(windows)]
+        {
+            req.settings.bash_path = "C:/Program Files/Git/bin/bash.exe".into();
+        }
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || run(req, tx, Arc::new(AtomicBool::new(false))));
-        let mut saw_approval = false;
-        let mut final_text = String::new();
         loop {
             match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
-                Event::Approval(call, tx) => {
-                    assert_eq!(call.name, "bash");
-                    saw_approval = true;
-                    tx.send(false).unwrap();
-                }
+                Event::Approval(_, _) => panic!("Trusted Bash must not ask for approval"),
                 Event::Error(e) => panic!("{e}"),
-                Event::Message(m) => final_text = m.content,
                 Event::Done => break,
                 _ => {}
             }
         }
-        assert!(saw_approval);
-        assert_eq!(final_text, "无需执行工具也可以继续。");
         let _ = requests.recv().unwrap();
         let (_, body) = requests.recv().unwrap();
-        let msgs = body["messages"].as_array().unwrap();
-        assert_eq!(msgs.last().unwrap()["role"], "tool");
         assert!(
-            msgs.last().unwrap()["content"]
+            body["messages"].as_array().unwrap().last().unwrap()["content"]
                 .as_str()
                 .unwrap()
-                .contains("拒绝")
+                .contains("trusted-output")
         );
         worker.join().unwrap();
         handle.join().unwrap();

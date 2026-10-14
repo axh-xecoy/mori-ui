@@ -25,6 +25,10 @@ pub fn tr(text: &str) -> String {
         }
     }
     match text {
+        "会话操作" => "Conversation actions", "思考：自动" => "Thinking: Auto", "思考：开启" => "Thinking: On", "思考：关闭" => "Thinking: Off",
+        "选择模型默认、开启或关闭思考；需要模型支持" => "Use model default, enable or disable thinking; model support required",
+        "信任调用：开启" => "Trusted calls: On", "信任调用：关闭" => "Trusted calls: Off", "信任模式：自动执行 Bash 调用" => "Trusted mode: execute Bash automatically", "每次执行前确认" => "Confirm before each call", "●  Mori 正在回复…" => "●  Mori is responding…",
+
         "正在连接模型…"=>"Connecting to the model…", "正在回复…"=>"Receiving response…", "等待你的工具执行确认"=>"Waiting for your tool approval",
         "请填写名称和有效的 HTTP / HTTPS 地址"=>"Enter a name and a valid HTTP or HTTPS URL", "请先选择一个已启用的服务商"=>"Choose an enabled provider first", "先选择模型；本地服务可在设置中获取模型列表"=>"Choose a model first. Fetch local models in settings.",
         "先停止回复，再删除这条会话"=>"Stop the response before deleting this conversation", "已停止，已收到的内容已保存"=>"Stopped. The received content is saved.", "已创建会话分支，原对话保留"=>"Conversation branched. The original is preserved.",

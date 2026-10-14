@@ -150,11 +150,12 @@ print(greet("Mori"))
                             this.new_chat(window,cx);this.toast=None;
                             this.composer.update(cx,|s,cx|s.set_value("保持已有文字",window,cx));
                             let image=Image::from_bytes(ImageFormat::Png,include_bytes!("../../assets/mori-128.png").to_vec());
-                            let paths=ExternalPaths(vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md")].into());
+                            let project=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                            let paths=ExternalPaths(vec![project.join("README.md"),project.join("assets/mori-128.png")].into());
                             let item=ClipboardItem {entries:vec![ClipboardEntry::Image(image),ClipboardEntry::ExternalPaths(paths),ClipboardEntry::String(ClipboardString::new("不要插入替代文本".into()))]};
                             this.paste_attachments(item,window,cx);assert_eq!(this.attachments_loading,1);this.send(window,cx);assert!(this.generation.is_none());assert!(this.current().unwrap().messages.is_empty());
                         },
-                        39 => {assert_eq!(this.attachments_loading,0);assert_eq!(this.attachments.len(),2);assert!(this.attachments.iter().any(|a|a.mime=="image/png"));assert_eq!(this.composer.read(cx).value().as_ref(),"保持已有文字");},
+                        39 => {assert_eq!(this.attachments_loading,0);assert_eq!(this.attachments.len(),2);assert!(this.attachments.iter().any(|a|a.name=="mori-128.png"));assert_eq!(this.composer.read(cx).value().as_ref(),"保持已有文字");},
                         40 => {
                             let p=&mut this.library.providers[0];p.enabled=true;p.models=vec!["available-model".into()];let pid=p.id.clone();
                             let c=this.current_mut().unwrap();c.provider_id=pid.clone();c.model="removed-model".into();let old=c.id.clone();

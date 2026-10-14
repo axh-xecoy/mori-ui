@@ -1183,24 +1183,7 @@ impl Mori {
         self.attachments_loading += 1;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let result = (|| -> anyhow::Result<Vec<Attachment>> {
-                let store = Store::new()?;
-                let mut attachments = vec![];
-                for entry in item.entries {
-                    match entry {
-                        ClipboardEntry::Image(image) => {
-                            attachments.push(store.clipboard_image(image.bytes())?)
-                        }
-                        ClipboardEntry::ExternalPaths(paths) => {
-                            for path in paths.paths() {
-                                attachments.push(store.attach(path)?);
-                            }
-                        }
-                        ClipboardEntry::String(_) => {}
-                    }
-                }
-                Ok(attachments)
-            })();
+            let result = Store::new().and_then(|store| store.clipboard_attachments(&item));
             let _ = tx.send(Work::Attach(target, result));
         });
         cx.notify();

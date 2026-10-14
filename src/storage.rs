@@ -1,7 +1,30 @@
 use crate::model::*;
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+
+fn decode_clipboard_image(bytes: &[u8]) -> Result<image::DynamicImage> {
+    if bytes.len() > 128 * 1024 * 1024 {
+        bail!("剪贴板图片过大");
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(96 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode().context("剪贴板图片无法读取")
+}
+
+fn image_fingerprint(decoded: &image::DynamicImage) -> u64 {
+    let pixels = decoded.to_rgba8();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    pixels.dimensions().hash(&mut hash);
+    pixels.as_raw().hash(&mut hash);
+    hash.finish()
+}
 
 pub struct Store {
     pub root: PathBuf,
@@ -84,18 +107,11 @@ impl Store {
             text,
         })
     }
+    #[cfg(test)]
     pub fn clipboard_image(&self, bytes: &[u8]) -> Result<Attachment> {
-        if bytes.len() > 128 * 1024 * 1024 {
-            anyhow::bail!("剪贴板图片过大");
-        }
-        let mut reader =
-            image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(16384);
-        limits.max_image_height = Some(16384);
-        limits.max_alloc = Some(96 * 1024 * 1024);
-        reader.limits(limits);
-        let decoded = reader.decode().context("剪贴板图片无法读取")?;
+        self.save_clipboard_image(&decode_clipboard_image(bytes)?)
+    }
+    fn save_clipboard_image(&self, decoded: &image::DynamicImage) -> Result<Attachment> {
         let mut png = std::io::Cursor::new(Vec::new());
         decoded.write_to(&mut png, image::ImageFormat::Png)?;
         if png.get_ref().len() > 20 * 1024 * 1024 {
@@ -108,6 +124,40 @@ impl Store {
             mime: "image/png".into(),
             text: None,
         })
+    }
+    pub fn clipboard_attachments(&self, item: &gpui_kit::ClipboardItem) -> Result<Vec<Attachment>> {
+        use gpui_kit::ClipboardEntry;
+        let mut attachments = Vec::new();
+        let mut paths_seen = HashSet::new();
+        let mut images_seen = HashSet::new();
+        // Prefer the file representation so the original filename and format survive.
+        // Deduplicate only within this paste; a later paste may intentionally repeat it.
+        for entry in &item.entries {
+            if let ClipboardEntry::ExternalPaths(paths) = entry {
+                for path in paths.paths() {
+                    if !paths_seen.insert(std::fs::canonicalize(path)?) {
+                        continue;
+                    }
+                    let attachment = self.attach(path)?;
+                    if attachment.mime.starts_with("image/") {
+                        let bytes = std::fs::read(&attachment.path)?;
+                        if let Ok(decoded) = decode_clipboard_image(&bytes) {
+                            images_seen.insert(image_fingerprint(&decoded));
+                        }
+                    }
+                    attachments.push(attachment);
+                }
+            }
+        }
+        for entry in &item.entries {
+            if let ClipboardEntry::Image(image) = entry {
+                let decoded = decode_clipboard_image(image.bytes())?;
+                if images_seen.insert(image_fingerprint(&decoded)) {
+                    attachments.push(self.save_clipboard_image(&decoded)?);
+                }
+            }
+        }
+        Ok(attachments)
     }
     pub fn save_media(&self, bytes: &[u8], ext: &str) -> Result<PathBuf> {
         let path = self
@@ -153,6 +203,62 @@ pub fn set_api_key(provider: &Provider, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
+
+    #[test]
+    fn clipboard_deduplicates_file_and_bitmap_but_preserves_unrelated_media() {
+        let root = std::env::temp_dir().join(format!("mori-paste-test-{}", id()));
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        let store = Store { root: root.clone() };
+        let picture = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            3,
+            image::Rgb([12, 34, 56]),
+        ));
+        let path = root.join("original.png");
+        picture.save(&path).unwrap();
+        let doc = root.join("notes.txt");
+        std::fs::write(&doc, "keep this document").unwrap();
+        let mut bitmap = std::io::Cursor::new(Vec::new());
+        picture
+            .write_to(&mut bitmap, image::ImageFormat::Bmp)
+            .unwrap();
+        let raw = Image::from_bytes(ImageFormat::Bmp, bitmap.into_inner());
+        let paths = ExternalPaths(vec![path.clone(), path, doc].into());
+        let item = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::Image(raw.clone()),
+                ClipboardEntry::ExternalPaths(paths),
+                ClipboardEntry::Image(raw),
+            ],
+        };
+        let imported = store.clipboard_attachments(&item).unwrap();
+        assert_eq!(imported.len(), 2);
+        assert_eq!(imported[0].name, "original.png");
+        assert_eq!(imported[1].text.as_deref(), Some("keep this document"));
+        assert_eq!(
+            std::fs::read_dir(root.join("attachments")).unwrap().count(),
+            2
+        );
+        // Repeating a paste is a separate action and remains allowed.
+        assert_eq!(store.clipboard_attachments(&item).unwrap().len(), 2);
+        let different = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            3,
+            image::Rgb([90, 80, 70]),
+        ));
+        let mut png = std::io::Cursor::new(Vec::new());
+        different
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let mut mixed = item;
+        mixed.entries.push(ClipboardEntry::Image(Image::from_bytes(
+            ImageFormat::Png,
+            png.into_inner(),
+        )));
+        assert_eq!(store.clipboard_attachments(&mixed).unwrap().len(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn clipboard_bitmap_is_normalized_to_a_model_compatible_png() {
         let root = std::env::temp_dir().join(format!("mori-clipboard-test-{}", id()));

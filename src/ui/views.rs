@@ -631,6 +631,8 @@ impl Mori {
         let tools = self.library.settings.tools_enabled;
         div()
             .w_full()
+            .flex_shrink_0()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_2()
@@ -699,6 +701,8 @@ impl Mori {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_shrink_0()
+                    .min_w_0()
                     .w_full()
                     .max_w(px(896.))
                     .mx_auto()
@@ -790,13 +794,17 @@ impl Mori {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .flex_wrap()
+                            .w_full()
+                            .min_w_0()
                             .gap_2()
                             .mt_2()
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex_wrap()
                                     .gap_1()
                                     .child(
                                         tiny("attach", "paperclip", "添加图片或文档")
@@ -915,15 +923,18 @@ impl Mori {
                                     .flex()
                                     .items_center()
                                     .gap_3()
+                                    .flex_shrink_0()
                                     .ml_auto()
-                                    .child(label(
-                                        if self.library.settings.send_on_enter {
-                                            "Enter 发送 · Shift+Enter 换行"
-                                        } else {
-                                            "Ctrl+Enter 发送 · Enter 换行"
-                                        },
-                                        p.muted,
-                                    ))
+                                    .when(!self.compact && !self.model_picker, |d| {
+                                        d.child(label(
+                                            if self.library.settings.send_on_enter {
+                                                "Enter 发送 · Shift+Enter 换行"
+                                            } else {
+                                                "Ctrl+Enter 发送 · Enter 换行"
+                                            },
+                                            p.muted,
+                                        ))
+                                    })
                                     .child(if self.generation.is_some() {
                                         Button::new("send")
                                             .primary()
@@ -1345,6 +1356,13 @@ impl Render for Mori {
         self.compact =
             window.viewport_size().height < px(760.) || window.viewport_size().width < px(1080.);
         let p = Palette::new(self.library.settings.dark);
+        let show_sidebar = self.sidebar
+            && !(self.page == Page::Chat
+                && self.model_picker
+                && f32::from(window.viewport_size().width)
+                    - self.library.settings.sidebar_width.clamp(220., 380.)
+                    - 290.
+                    < 420.);
         div()
             .id("mori-root")
             .size_full()
@@ -1407,7 +1425,7 @@ impl Render for Mori {
                     cx.notify();
                 }
             }))
-            .when(self.sidebar, |d| {
+            .when(show_sidebar, |d| {
                 d.child(self.render_sidebar(p, cx)).child(
                     div()
                         .id("sidebar-resize")

@@ -14,8 +14,9 @@ pub fn start(
     });
     cx.spawn(async move |cx| {
         let input_only=std::env::var_os("MORI_INPUT_CHECK_ONLY").is_some();
-        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu"].into_iter().enumerate().filter(|(stage,_)| !input_only||*stage==19) {
+        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu", "composer-narrow", "composer-narrow-models"].into_iter().enumerate().filter(|(stage,_)| !input_only||*stage==19) {
             let _ = handle.update(cx, |_, window, cx| {
+                if stage==27 {window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),cx);}
                 view.update(cx, |this, cx| {
                     this.page = Page::Chat; this.model_picker = false; this.library.settings.dark = false;
                     if stage == 1 {
@@ -103,7 +104,9 @@ pub fn start(
                         },
                         24 => {let c=this.current_mut().unwrap();let reply=c.messages.last_mut().unwrap();reply.content.push_str("\n- 周六下午：在家读一章书。\n- 周日：给喜欢的人做一顿饭。\n\n不用安排得太满，休息也是计划的一部分。");reply.elapsed_ms=8900;reply.tokens=215;},
                         25 => {this.generation=None;this.status.clear();let c=this.current().unwrap().clone();this.library.conversations=vec![c];},
-                        26 => {}, _ => {}
+                        26 => {},
+                        27 => {this.generation=None;this.status.clear();this.library.settings.sidebar_width=380.;window.resize(size(px(900.),px(640.)));this.set_language("en",window,cx);this.library.settings.tools_enabled=true;},
+                        28 => {this.model_picker=true;}, _ => {}
                     }
                     Theme::change(if this.library.settings.dark {ThemeMode::Dark} else {ThemeMode::Light},Some(window),cx);
                     Mori::tint(cx,this.library.settings.dark); cx.notify();

@@ -249,7 +249,12 @@ impl Mori {
                                                         if c.model.is_empty() {
                                                             tr("选择一个模型")
                                                         } else {
-                                                            c.model.clone()
+                                                            self.library
+                                                                .providers
+                                                                .iter()
+                                                                .find(|p| p.id == c.provider_id)
+                                                                .map(|p| p.model_name(&c.model))
+                                                                .unwrap_or_else(|| c.model.clone())
                                                         }
                                                     )),
                                             ),
@@ -547,7 +552,7 @@ impl Mori {
                                             div()
                                                 .text_sm()
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .child("Mori"),
+                                                .child(self.reply_model_name(m)),
                                         )
                                         .when(
                                             !user
@@ -1352,9 +1357,16 @@ impl Mori {
         let c = self.current();
         let title = c.map(|c| c.title.as_str()).unwrap_or("新的对话");
         let model = c
-            .map(|c| c.model.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("选择模型");
+            .filter(|c| !c.model.is_empty())
+            .map(|c| {
+                self.library
+                    .providers
+                    .iter()
+                    .find(|p| p.id == c.provider_id)
+                    .map(|p| p.model_name(&c.model))
+                    .unwrap_or_else(|| c.model.clone())
+            })
+            .unwrap_or_else(|| tr("选择模型"));
         let assistant = c
             .and_then(|c| {
                 self.library
@@ -1574,8 +1586,9 @@ impl Mori {
                             .children(provider.models.iter().map(|model| {
                                 let pid = provider.id.clone();
                                 let model = model.clone();
-                                let shown = model.clone();
+                                let shown = provider.model_name(&model);
                                 navigation_button(format!("model-{pid}-{model}"), shown, "cpu")
+                                    .tooltip(model.clone())
                                     .w_full()
                                     .justify_start()
                                     .disabled(self.generation.is_some() || self.media_busy)

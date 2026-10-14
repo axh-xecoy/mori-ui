@@ -29,6 +29,7 @@ fn image_fingerprint(decoded: &image::DynamicImage) -> u64 {
 pub struct Store {
     pub root: PathBuf,
     settings_snapshot: std::sync::Mutex<serde_json::Value>,
+    models_snapshot: std::sync::Mutex<serde_json::Value>,
 }
 impl Store {
     fn at(root: PathBuf) -> Self {
@@ -37,6 +38,7 @@ impl Store {
             settings_snapshot: std::sync::Mutex::new(
                 serde_json::to_value(Settings::default()).expect("serialize preferences"),
             ),
+            models_snapshot: std::sync::Mutex::new(serde_json::json!({})),
         }
     }
     pub fn new() -> Result<Self> {
@@ -72,8 +74,23 @@ impl Store {
                 .unwrap()
                 .extend(fields.clone());
         }
-        let library: Library = serde_json::from_value(value)?;
+        let model_settings = value["settings"]["provider_model_configs"].clone();
+        let mut library: Library = serde_json::from_value(value)?;
+        for provider in &mut library.providers {
+            if let Some(configs) = model_settings.get(&provider.id) {
+                let saved: std::collections::BTreeMap<String, ModelConfig> =
+                    serde_json::from_value(configs.clone())?;
+                provider.model_configs.extend(saved);
+            }
+        }
+        *self.models_snapshot.lock().unwrap() = model_settings_value(&library)?;
         *self.settings_snapshot.lock().unwrap() = serde_json::to_value(&library.settings)?;
+        if library.settings.parameter_version == 0 {
+            if library.settings.max_tokens == 8192 {
+                library.settings.max_tokens = 0;
+            }
+            library.settings.parameter_version = 1;
+        }
         Ok(library)
     }
     pub fn save(&self, library: &Library) -> Result<()> {
@@ -100,8 +117,26 @@ impl Store {
                 fields.insert(key.clone(), value.clone());
             }
         }
+        let models = model_settings_value(library)?;
+        let mut model_snapshot = self.models_snapshot.lock().unwrap();
+        if !saved["provider_model_configs"].is_object() {
+            saved["provider_model_configs"] = serde_json::json!({});
+        }
+        for (pid, configs) in models.as_object().unwrap() {
+            if !saved["provider_model_configs"][pid].is_object() {
+                saved["provider_model_configs"][pid] = serde_json::json!({});
+            }
+            for (model, config) in configs.as_object().unwrap() {
+                if model_snapshot[pid][model] != *config
+                    || saved["provider_model_configs"][pid].get(model).is_none()
+                {
+                    saved["provider_model_configs"][pid][model] = config.clone();
+                }
+            }
+        }
         atomic_json(&preferences, &saved)?;
         *snapshot = current;
+        *model_snapshot = models;
         let path = self.root.join("library.json");
         if path.exists() {
             std::fs::copy(&path, self.root.join("library.backup.json"))?;
@@ -219,6 +254,16 @@ impl Store {
         Ok(path)
     }
 }
+fn model_settings_value(library: &Library) -> Result<serde_json::Value> {
+    let mut models = serde_json::Map::new();
+    for provider in &library.providers {
+        models.insert(
+            provider.id.clone(),
+            serde_json::to_value(&provider.model_configs)?,
+        );
+    }
+    Ok(serde_json::Value::Object(models))
+}
 fn atomic_json(path: &Path, value: &serde_json::Value) -> Result<()> {
     let temp = path.with_extension(format!("{}.tmp", id()));
     let result = (|| -> Result<()> {
@@ -271,6 +316,90 @@ pub fn set_api_key(provider: &Provider, value: &str) -> Result<()> {
 mod tests {
     use super::*;
     use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
+    #[test]
+    fn model_profiles_survive_stale_instances_and_legacy_library_writes() {
+        let root = std::env::temp_dir().join(format!("mori-profiles-test-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let active = Store::at(root.clone());
+        let mut library = active.load().unwrap();
+        library.providers[0].models = vec!["qwen3:8b".into()];
+        library.providers[0].model_configs.insert(
+            "qwen3:8b".into(),
+            ModelConfig {
+                name: "千问3 8B".into(),
+                parameters: serde_json::from_value(serde_json::json!({"top_p":0.7})).unwrap(),
+            },
+        );
+        active.save(&library).unwrap();
+        let stale_store = Store::at(root.clone());
+        let stale = stale_store.load().unwrap();
+        let config = library.providers[0]
+            .model_configs
+            .get_mut("qwen3:8b")
+            .unwrap();
+        config.name = "千问 · 日常".into();
+        config
+            .parameters
+            .insert("top_p".into(), serde_json::json!(0.9));
+        active.save(&library).unwrap();
+        stale_store.save(&stale).unwrap();
+        let mut old = serde_json::to_value(stale).unwrap();
+        for provider in old["providers"].as_array_mut().unwrap() {
+            provider.as_object_mut().unwrap().remove("model_configs");
+        }
+        std::fs::write(root.join("library.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        let loaded = Store::at(root.clone()).load().unwrap();
+        assert_eq!(loaded.providers[0].model_name("qwen3:8b"), "千问 · 日常");
+        assert_eq!(
+            loaded.providers[0].model_configs["qwen3:8b"].parameters["top_p"],
+            0.9
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn legacy_output_limit_migrates_once_without_resetting_other_preferences() {
+        let root = std::env::temp_dir().join(format!("mori-limit-test-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut value = serde_json::to_value(Library::default()).unwrap();
+        value["settings"]["max_tokens"] = serde_json::json!(8192);
+        value["settings"]["send_on_enter"] = serde_json::json!(true);
+        value["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("parameter_version");
+        std::fs::write(
+            root.join("library.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let store = Store::at(root.clone());
+        let mut library = store.load().unwrap();
+        assert_eq!(library.settings.max_tokens, 0);
+        assert!(library.settings.send_on_enter);
+        library.providers[0].models.push("qwen3:8b".into());
+        library.providers[0].model_configs.insert(
+            "qwen3:8b".into(),
+            ModelConfig {
+                name: "千问3 8B".into(),
+                parameters: serde_json::from_value(
+                    serde_json::json!({"top_p":0.9,"options":{"num_ctx":65536}}),
+                )
+                .unwrap(),
+            },
+        );
+        store.save(&library).unwrap();
+        let reread = Store::at(root.clone()).load().unwrap();
+        assert_eq!(reread.settings.max_tokens, 0);
+        assert_eq!(reread.providers[0].model_name("qwen3:8b"), "千问3 8B");
+        assert_eq!(reread.providers[0].model_name("unknown"), "unknown");
+        library.settings.max_tokens = 8192;
+        store.save(&library).unwrap();
+        assert_eq!(
+            Store::at(root.clone()).load().unwrap().settings.max_tokens,
+            8192
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn preferences_migrate_and_survive_old_binary_and_stale_instance_saves() {

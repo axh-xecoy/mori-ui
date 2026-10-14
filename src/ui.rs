@@ -101,7 +101,7 @@ enum Work {
     Speech(anyhow::Result<std::path::PathBuf>),
     Image(String, anyhow::Result<Attachment>),
     Attach(String, anyhow::Result<Vec<Attachment>>),
-    Imported(anyhow::Result<Library>),
+    Imported(anyhow::Result<Box<Library>>),
     Notice(anyhow::Result<String>),
 }
 struct Generation {
@@ -154,14 +154,20 @@ impl Palette {
 pub struct Mori {
     library: Library,
     store: Option<Store>,
-    window_handle: AnyWindowHandle,
     page: Page,
     composer: Entity<TextareaState>,
     search: Entity<InputState>,
     provider_name: Entity<InputState>,
     provider_url: Entity<InputState>,
     provider_key: Entity<InputState>,
-    provider_models: Entity<TextareaState>,
+    model_id_input: Entity<InputState>,
+    model_name_input: Entity<InputState>,
+    model_temperature: Entity<InputState>,
+    model_top_p: Entity<InputState>,
+    model_max_tokens: Entity<InputState>,
+    model_parameters: Entity<TextareaState>,
+    model_editor: bool,
+    editing_model: String,
     assistant_name: Entity<InputState>,
     assistant_prompt: Entity<TextareaState>,
     advanced: Entity<TextareaState>,
@@ -363,12 +369,16 @@ impl Mori {
                 .placeholder(tr("新的 API Key（留空保留现有密钥）"))
                 .masked(true)
         });
-        let provider_models = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder(tr("每行一个模型 ID"))
-                .auto_grow(3, 6)
-        });
         let assistant_name = cx.new(|cx| InputState::new(window, cx));
+        let model_id_input = cx.new(|cx| InputState::new(window, cx).placeholder("qwen3:8b"));
+        let model_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr("默认使用模型 ID")));
+        let model_temperature =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr("服务商默认")));
+        let model_top_p = cx.new(|cx| InputState::new(window, cx).placeholder(tr("服务商默认")));
+        let model_max_tokens =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr("不设置客户端上限")));
+        let model_parameters = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 10));
         let assistant_prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(7, 12));
         let advanced = cx.new(|cx| TextareaState::new(window, cx).auto_grow(15, 25));
         let title_input = cx.new(|cx| InputState::new(window, cx));
@@ -423,14 +433,20 @@ impl Mori {
         let mut this = Self {
             library,
             store,
-            window_handle: window.window_handle(),
             page: Page::Chat,
             composer,
             search,
             provider_name,
             provider_url,
             provider_key,
-            provider_models,
+            model_id_input,
+            model_name_input,
+            model_temperature,
+            model_top_p,
+            model_max_tokens,
+            model_parameters,
+            model_editor: false,
+            editing_model: String::new(),
             assistant_name,
             assistant_prompt,
             advanced,
@@ -538,6 +554,28 @@ impl Mori {
             .active_id
             .as_ref()
             .and_then(|id| self.library.conversations.iter().find(|c| &c.id == id))
+    }
+    fn reply_model_name(&self, message: &Message) -> String {
+        let current = self.current();
+        let provider = if message.provider_id.is_empty() {
+            current.map(|c| c.provider_id.as_str()).unwrap_or("")
+        } else {
+            &message.provider_id
+        };
+        let model = if message.model_id.is_empty() {
+            current.map(|c| c.model.as_str()).unwrap_or("")
+        } else {
+            &message.model_id
+        };
+        if model.is_empty() {
+            return "Mori".into();
+        }
+        self.library
+            .providers
+            .iter()
+            .find(|p| p.id == provider)
+            .map(|p| p.model_name(model))
+            .unwrap_or_else(|| model.into())
     }
     fn current_mut(&mut self) -> Option<&mut Conversation> {
         let id = self.library.active_id.clone()?;
@@ -670,19 +708,17 @@ impl Mori {
         cx.notify();
     }
     fn load_provider(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_editor = false;
         self.selected_provider = index;
         let p = &self.library.providers[index];
         let name = p.name.clone();
         let url = p.base_url.clone();
-        let models = p.models.join("\n");
         self.provider_name
             .update(cx, |s, cx| s.set_value(name, window, cx));
         self.provider_url
             .update(cx, |s, cx| s.set_value(url, window, cx));
         self.provider_key
             .update(cx, |s, cx| s.set_value("", window, cx));
-        self.provider_models
-            .update(cx, |s, cx| s.set_value(models, window, cx));
         cx.notify();
     }
     fn save_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -707,16 +743,6 @@ impl Mori {
         p.name = name.trim().into();
         p.base_url = provider::normalize_base_url(&p.protocol, &url);
         let normalized = p.base_url.clone();
-        p.models = self
-            .provider_models
-            .read(cx)
-            .value()
-            .lines()
-            .flat_map(|s| s.split(','))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
         if let Some(store) = &self.store
             && let Err(e) = store.save(&self.library)
         {
@@ -1054,15 +1080,8 @@ impl Mori {
             match work {
                 Work::Models(id, result) => match result {
                     Ok(models) => {
-                        let text = models.join("\n");
                         if let Some(p) = self.library.providers.iter_mut().find(|p| p.id == id) {
                             p.models = models;
-                        }
-                        if self.library.providers[self.selected_provider].id == id {
-                            let input = self.provider_models.clone();
-                            let _ = self.window_handle.update(cx, |_, window, cx| {
-                                input.update(cx, |s, cx| s.set_value(text, window, cx))
-                            });
                         }
                         self.persist();
                         self.show_toast("连接成功，模型列表已更新".into());
@@ -1328,7 +1347,7 @@ impl Mori {
                     }
                     Ok(lib)
                 })();
-                let _ = tx.send(Work::Imported(result));
+                let _ = tx.send(Work::Imported(result.map(Box::new)));
             }
         });
     }

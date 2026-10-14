@@ -22,6 +22,139 @@ fn setting_row(title: &str, description: &str, control: impl IntoElement, p: Pal
 }
 
 impl Mori {
+    pub(super) fn edit_model(&mut self, model: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let config = self.library.providers[self.selected_provider]
+            .model_configs
+            .get(model)
+            .cloned()
+            .unwrap_or_default();
+        let mut parameters = config.parameters;
+        self.model_id_input
+            .update(cx, |s, cx| s.set_value(model, window, cx));
+        self.model_name_input
+            .update(cx, |s, cx| s.set_value(config.name, window, cx));
+        for (key, input) in [
+            ("temperature", &self.model_temperature),
+            ("top_p", &self.model_top_p),
+            ("max_tokens", &self.model_max_tokens),
+        ] {
+            let value = parameters
+                .remove(key)
+                .filter(|v| !v.is_null())
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            input.update(cx, |s, cx| s.set_value(value, window, cx));
+        }
+        self.model_parameters.update(cx, |s, cx| {
+            s.set_value(
+                serde_json::to_string_pretty(&parameters).unwrap(),
+                window,
+                cx,
+            )
+        });
+        self.editing_model = model.into();
+        self.model_editor = true;
+        cx.notify();
+    }
+    pub(super) fn save_model(&mut self, cx: &mut Context<Self>) {
+        let result = (|| -> anyhow::Result<(String, ModelConfig)> {
+            let model = self.model_id_input.read(cx).value().trim().to_string();
+            anyhow::ensure!(!model.is_empty(), "模型 ID 不能为空");
+            let value: serde_json::Value =
+                serde_json::from_str(&self.model_parameters.read(cx).value())?;
+            let mut parameters = value
+                .as_object()
+                .cloned()
+                .context("自定义参数必须是 JSON 对象")?;
+            for (key, input) in [
+                ("temperature", &self.model_temperature),
+                ("top_p", &self.model_top_p),
+                ("max_tokens", &self.model_max_tokens),
+            ] {
+                let text = input.read(cx).value();
+                let text = text.trim();
+                if text.is_empty() {
+                    let native_key = if key == "max_tokens" {
+                        "num_predict"
+                    } else {
+                        key
+                    };
+                    let native = parameters
+                        .get("options")
+                        .and_then(|v| v.as_object())
+                        .is_some_and(|v| v.contains_key(native_key));
+                    if !native
+                        && !(key == "max_tokens"
+                            && parameters.contains_key("max_completion_tokens"))
+                    {
+                        parameters.entry(key).or_insert(serde_json::Value::Null);
+                    }
+                } else {
+                    let value: serde_json::Value = serde_json::from_str(text)?;
+                    if key == "max_tokens" {
+                        anyhow::ensure!(
+                            value.as_u64().is_some_and(|v| v > 0),
+                            "输出上限必须是正整数，留空不设置上限"
+                        );
+                    }
+                    parameters.insert(key.into(), value);
+                }
+            }
+            provider::validate_parameters(&parameters)?;
+            Ok((
+                model,
+                ModelConfig {
+                    name: self.model_name_input.read(cx).value().trim().into(),
+                    parameters,
+                },
+            ))
+        })();
+        match result {
+            Ok((model, config)) => {
+                let p = &mut self.library.providers[self.selected_provider];
+                if !p.models.contains(&model) {
+                    p.models.push(model.clone());
+                }
+                p.model_configs.insert(model, config);
+                self.model_editor = false;
+                self.persist();
+                self.show_toast("模型设置已保存".into());
+            }
+            Err(e) => self.show_toast(format!("模型设置无效：{e:#}")),
+        }
+        cx.notify();
+    }
+    fn render_model_settings(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let provider = &self.library.providers[self.selected_provider];
+        div().flex().flex_col().gap_3()
+            .child(div().flex().items_center().justify_between()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("模型与高级参数")))
+                .when(!self.model_editor,|d|d.child(button("add-model","添加模型","plus").on_click(cx.listener(|this,_,w,cx|this.edit_model("",w,cx))))) .when(self.model_editor,|d|d.child(Button::new("save-model-top").primary().label(tr("保存模型设置")).on_click(cx.listener(|this,_,_,cx|this.save_model(cx))))))
+            .when(provider.models.is_empty(),|d|d.child(label("连接获取模型，或手动添加模型。",p.muted)))
+            .child(div().id("provider-model-list").flex().flex_col().gap_2().max_h(px(240.)).overflow_y_scroll().children(provider.models.iter().filter(|model|!self.model_editor || **model==self.editing_model).map(|model|{
+                let edit=model.clone();let remove=model.clone();let shown=provider.model_name(model);
+                div().flex().items_center().gap_2().p_3().rounded_lg().bg(rgb(p.bg))
+                    .child(div().flex_1().min_w_0().child(div().child(shown.clone()))
+                        .when(shown!=*model,|d|d.child(label(model.clone(),p.muted))))
+                    .child(tiny(format!("edit-model-{model}"),"sliders-horizontal","模型高级参数")
+                        .on_click(cx.listener(move|this,_,w,cx|this.edit_model(&edit,w,cx))))
+                    .child(tiny(format!("remove-model-{model}"),"trash","移除模型")
+                        .on_click(cx.listener(move|this,_,_,cx|{this.library.providers[this.selected_provider].models.retain(|m|m!=&remove);this.model_editor=false;this.persist();cx.notify();})))
+            })))
+            .when(self.model_editor,|d|d.child(div().flex().flex_col().gap_4().p_4().border_1().border_color(rgb(p.line)).rounded_lg()
+                .child(field("模型 ID",Input::new(&self.model_id_input).disabled(!self.editing_model.is_empty()),p))
+                .child(field("显示名称（留空使用模型 ID）",Input::new(&self.model_name_input),p))
+                .child(div().flex().flex_wrap().gap_3()
+                    .child(field("Temperature",Input::new(&self.model_temperature),p).flex_1().min_w(px(120.)))
+                    .child(field("Top P",Input::new(&self.model_top_p),p).flex_1().min_w(px(120.)))
+                    .child(field("输出上限（tokens）",Input::new(&self.model_max_tokens),p).flex_1().min_w(px(150.))))
+                .child(label("采样参数留空使用服务商默认；输出留空不设置客户端上限。Claude 必须填写输出上限。",p.muted))
+                .child(field("更多参数（JSON）",Textarea::new(&self.model_parameters).font_family("Cascadia Code"),p))
+                .child(label("支持 top_k、seed、stop、惩罚、reasoning_effort，以及 options 等服务商原生嵌套参数。null 表示不发送该参数。",p.muted))
+                .child(div().flex().gap_2()
+                    .child(Button::new("save-model-config").primary().label(tr("保存模型设置")).on_click(cx.listener(|this,_,_,cx|this.save_model(cx))))
+                    .child(button("cancel-model-config","取消","x").on_click(cx.listener(|this,_,_,cx|{this.model_editor=false;cx.notify();}))))))
+    }
     pub(super) fn set_language(
         &mut self,
         language: &str,
@@ -35,6 +168,10 @@ impl Mori {
             (&self.search, "搜索对话"),
             (&self.provider_name, "服务商名称"),
             (&self.provider_key, "新的 API Key（留空保留现有密钥）"),
+            (&self.model_name_input, "默认使用模型 ID"),
+            (&self.model_temperature, "服务商默认"),
+            (&self.model_top_p, "服务商默认"),
+            (&self.model_max_tokens, "不设置客户端上限"),
             (&self.mcp_name, "例如：我的资料库"),
             (&self.mcp_command, "例如：npx.cmd 或程序的完整路径"),
             (&self.mcp_url, "https://example.com/mcp（本地程序留空）"),
@@ -43,7 +180,6 @@ impl Mori {
         }
         for (input, text) in [
             (&self.composer, "有什么想聊的？也可以附上图片或文档…"),
-            (&self.provider_models, "每行一个模型 ID"),
             (&self.mcp_args, "每行一个启动参数"),
         ] {
             input.update(cx, |s, cx| s.set_placeholder(tr(text), window, cx));
@@ -255,6 +391,7 @@ impl Mori {
                             protocol: Protocol::OpenAi,
                             base_url: "https://api.example.com/v1".into(),
                             models: vec![],
+                            model_configs: Default::default(),
                             enabled: true,
                         });
                         this.load_provider(this.library.providers.len() - 1, w, cx);
@@ -272,6 +409,19 @@ impl Mori {
     fn render_connection_form(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let provider = &self.library.providers[self.selected_provider];
         let protocol = provider.protocol.clone();
+        if self.model_editor {
+            return card(p)
+                .p_6()
+                .child(
+                    button("back-to-connection", "返回连接设置", "arrow-left").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.model_editor = false;
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .child(self.render_model_settings(p, cx));
+        }
         card(p)
             .p_6()
             .child(
@@ -342,11 +492,7 @@ impl Mori {
                 p,
             ))
             .child(field("API Key", Input::new(&self.provider_key), p))
-            .child(field(
-                "模型 ID（可手动填写，每行一个）",
-                Textarea::new(&self.provider_models),
-                p,
-            ))
+            .child(self.render_model_settings(p, cx))
             .child(
                 div()
                     .flex()

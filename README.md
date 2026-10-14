@@ -28,6 +28,7 @@ Ollama 原生协议填写服务器根地址（例如 `http://localhost:11434`）
 - **会话管理**：搜索标题和正文、置顶、列表直接重命名和删除、撤销最近一次删除、草稿自动保存、编辑消息时保留原会话并创建分支、从任意回复分支、JSON 导入与 Markdown / JSON 导出。
 - **多模态**：选择或拖入图片、UTF-8 文档和 PDF；图片消息预览。Ollama 接收图片与 PDF 提取的文字，云端支持原生图片 / PDF 内容块。单个附件最多 20 MB。
 - **输入与设置**：输入框有独立文件拖拽区域；图片草稿显示缩略图，附件托盘可横向滚动。用户消息与头像在右侧，模型在左侧。侧栏右边缘可拖动调宽并自动保存。设置分为通用、模型连接、数据与隐私，支持简体中文 / English、浅色 / 深色和 Enter / Ctrl+Enter 发送（Shift+Enter 换行）。
+- **模型管理**：发现的模型逐项显示，可手动添加、移除、设置显示名称和高级参数。模型 ID 用于请求，名称默认等于 ID；自定义名称显示在选择器、侧栏和回复头像旁，新回复保存实际模型 / 服务商标识。
 - **图片与语音**：通过支持相应接口的 OpenAI 兼容服务生成图片、朗读消息、导入音频转写，以及麦克风录音转写。转写先放入输入框，发送由用户决定。
 - **助手**：预设日常、写作、学习和翻译伙伴，自定义名称与系统提示词。
 - **工具**：Function call、自定义函数程序、MCP stdio / Streamable HTTP、Bash。逐次展示工具参数，由用户允许或拒绝，然后把结果交回模型继续对话。
@@ -73,6 +74,12 @@ Bash 默认在系统桌面目录执行，支持 Windows 桌面重定向；每次
 
 ## 能力范围
 
+在「设置 → 模型连接」点击模型行的参数按钮，可设置名称、Temperature、Top P、输出上限与更多 JSON 参数。输出留空不设置客户端上限，采样留空省略参数。自定义 JSON 支持 `top_k`、`seed`、`stop`、惩罚参数、`reasoning_effort`、`response_format` 与原生嵌套 `options`；字段是否支持及数值范围由服务商决定。`null` 删除请求中的该参数，嵌套对象合并；模型参数优先于全局参数。会话管理的 `model/messages/stream/tools/system` 不允许通过参数覆盖。全局 JSON 参数可在扩展高级设置的 `request_parameters` 中配置。
+
+默认输出上限为 0：OpenAI 兼容请求省略上限字段，Ollama 使用 `num_predict: -1`。旧版本的默认 8192 在首次升级时迁移为 0，保留其他偏好；迁移后明确设置的 8192 仍保留。Claude 要求正整数 `max_tokens`，请按实际模型填写；服务商和模型自身的输出 / 上下文限制仍有效。参数适配依据：[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[Ollama Modelfile](https://docs.ollama.com/modelfile)、[Claude Messages](https://platform.claude.com/docs/en/api/messages/create)。
+
+名称与参数同时保存在会话库和独立偏好中，防止旧版本重写会话库或过期实例退出时覆盖新配置；刷新模型列表不会清除其配置。旧回复没有独立模型标识时，以原会话的模型名称作为回退。
+
 图片、PDF、工具、图像生成和音频接口取决于所选服务商与模型。OpenAI 兼容服务商不一定提供图像和音频接口。音频输入是录音后转写，不是 Realtime 全双工语音；本地 PDF 文本提取不执行 OCR。当前没有实现账户云同步、向量知识库、原生网页搜索或 Responses API；可以通过 MCP 接入搜索与资料服务。
 
 停止按钮会立即结束界面接收并保留当前回复。阻塞 HTTP 连接会在下一段响应到来或超时后释放，未实现服务商后台任务的远程取消。当前一次运行一个生成请求，支持生成中查看其他会话。
@@ -89,7 +96,7 @@ cargo fmt --check
 
 测试使用本地 HTTP 模拟服务，覆盖三种服务商协议的完整流式请求、跨网络块的 UTF-8 / SSE、工具拒绝后的继续回复、异常断流、MCP 初始化 / 工具发现 / 执行 / 会话头、本地保存与备份。不会调用真实付费服务。
 
-界面验证使用 GPUI 自身的 `render_to_image`，不是网页仿制效果图。运行下列命令将输出 47 个实际界面状态，并自动检查重命名、删除、恢复、保存服务商提示、数学公式、设置分页、英文、小窗口、图片附件预览，以及输入框的 Enter / Ctrl+Enter / Shift+Enter 动作分发和侧栏鼠标拖动：
+界面验证使用 GPUI 自身的 `render_to_image`，不是网页仿制效果图。运行下列命令将输出 52 个实际界面状态，并自动检查重命名、删除、恢复、保存服务商提示、数学公式、设置分页、英文、小窗口、图片附件预览，以及输入框的 Enter / Ctrl+Enter / Shift+Enter 动作分发和侧栏鼠标拖动：
 
 ```powershell
 $env:MORI_DATA_DIR = "$PWD/.mori-visual"

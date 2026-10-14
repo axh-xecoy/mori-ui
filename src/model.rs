@@ -6,6 +6,12 @@ use uuid::Uuid;
 pub fn id() -> String {
     Uuid::new_v4().to_string()
 }
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct ModelConfig {
+    pub name: String,
+    pub parameters: serde_json::Map<String, Value>,
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub enum Protocol {
@@ -21,9 +27,19 @@ pub struct Provider {
     pub protocol: Protocol,
     pub base_url: String,
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_configs: std::collections::BTreeMap<String, ModelConfig>,
     pub enabled: bool,
 }
 impl Provider {
+    pub fn model_name(&self, model: &str) -> String {
+        self.model_configs
+            .get(model)
+            .map(|c| c.name.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(model)
+            .into()
+    }
     fn preset(name: &str, protocol: Protocol, url: &str, models: &[&str]) -> Self {
         Self {
             id: name.to_lowercase().replace(' ', "-"),
@@ -31,6 +47,7 @@ impl Provider {
             protocol,
             base_url: url.into(),
             models: models.iter().map(|s| s.to_string()).collect(),
+            model_configs: Default::default(),
             enabled: true,
         }
     }
@@ -113,6 +130,10 @@ pub struct ToolCall {
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Message {
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub provider_id: String,
     pub id: String,
     pub role: String,
     pub content: String,
@@ -136,6 +157,8 @@ impl Message {
         Self {
             id: id(),
             role: role.into(),
+            model_id: String::new(),
+            provider_id: String::new(),
             content: content.into(),
             reasoning: String::new(),
             thinking_blocks: vec![],
@@ -252,11 +275,14 @@ pub struct FunctionConfig {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(default)]
+    pub parameter_version: u32,
     pub language: String,
     pub send_on_enter: bool,
     pub sidebar_width: f32,
     pub temperature: f64,
     pub max_tokens: u32,
+    pub request_parameters: serde_json::Map<String, Value>,
     pub dark: bool,
     pub tools_enabled: bool,
     pub bash_enabled: bool,
@@ -272,11 +298,13 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            parameter_version: 1,
             language: "zh-CN".into(),
             send_on_enter: false,
             sidebar_width: 252.,
             temperature: 0.7,
-            max_tokens: 8192,
+            max_tokens: 0,
+            request_parameters: Default::default(),
             dark: false,
             tools_enabled: false,
             bash_enabled: false,

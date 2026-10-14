@@ -234,7 +234,14 @@ impl Mori {
                     .flex()
                     .gap_4()
                     .child(field("创造性（0–2）", Input::new(&self.temperature), p).flex_1())
-                    .child(field("最长输出（tokens）", Input::new(&self.max_tokens), p).flex_1()),
+                    .child(
+                        field(
+                            "最长输出（0 = 不设置上限）",
+                            Input::new(&self.max_tokens),
+                            p,
+                        )
+                        .flex_1(),
+                    ),
             )
             .child(field("图片生成模型", Input::new(&self.image_model), p))
             .child(
@@ -253,10 +260,10 @@ impl Mori {
                     .w(px(140.))
                     .on_click(cx.listener(|this, _, w, cx| {
                         let temp = this.temperature.read(cx).value().parse::<f64>();
-                        let max = this.max_tokens.read(cx).value().parse::<u32>();
+                        let max = this.max_tokens.read(cx).value().trim().parse::<u32>();
                         match (temp, max) {
                             (Ok(temp), Ok(max))
-                                if temp.is_finite() && (0.0..=2.0).contains(&temp) && max > 0 =>
+                                if temp.is_finite() && (0.0..=2.0).contains(&temp) =>
                             {
                                 this.library.settings.temperature = temp;
                                 this.library.settings.max_tokens = max;
@@ -270,7 +277,7 @@ impl Mori {
                                 this.persist();
                                 this.show_toast("偏好已保存".into());
                             }
-                            _ => this.show_toast("创造性须为 0–2，最长输出须为正整数".into()),
+                            _ => this.show_toast("创造性须为 0–2，最长输出须为非负整数".into()),
                         }
                         cx.notify();
                     })),
@@ -284,7 +291,7 @@ impl Mori {
                 .child(Textarea::new(&self.advanced).font_family("Cascadia Code").text_sm())
                 .child(Button::new("save-advanced").primary().label(tr("验证并保存")).on_click(cx.listener(|this, _, w, cx| {
                     match this.library.settings.patched(&this.advanced.read(cx).value()) {
-                        Ok(s) if s.temperature.is_finite() && (0.0..=2.0).contains(&s.temperature) && s.max_tokens > 0 => {
+                        Ok(s) if s.temperature.is_finite() && (0.0..=2.0).contains(&s.temperature) => {
                             this.library.settings = s;
                             this.composer.update(cx, |s,cx| s.set_submit_on_enter(this.library.settings.send_on_enter,cx));
                             let language=this.library.settings.language.clone();this.set_language(&language,w,cx);
@@ -295,7 +302,7 @@ impl Mori {
                             this.speech_model.update(cx, |s,cx| s.set_value(this.library.settings.speech_model.clone(),w,cx));
                             this.transcription_model.update(cx, |s,cx| s.set_value(this.library.settings.transcription_model.clone(),w,cx));
                             this.persist(); this.show_toast("扩展设置已保存".into());
-                        }, Ok(_) => this.show_toast("温度须为 0–2，max_tokens 须大于 0".into()), Err(e) => this.show_toast(format!("JSON 格式错误：{e}")),
+                        }, Ok(_) => this.show_toast("温度须为 0–2，max_tokens 须为非负整数".into()), Err(e) => this.show_toast(format!("JSON 格式错误：{e}")),
                     } cx.notify();
                 })))
                 .child(label("函数参数 JSON 通过 stdin 交给 command，程序输出返回模型。每次调用都需要确认。", p.muted))))

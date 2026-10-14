@@ -224,11 +224,13 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
     let mut body = json!({"model":request.conversation.model,"messages":messages(&request.provider.protocol, history, &request.prompt)?,"stream":true});
     match request.provider.protocol {
         Protocol::Ollama => {
-            body["options"] = json!({"temperature":request.settings.temperature,"num_predict":request.settings.max_tokens});
+            body["options"] = json!({"temperature":request.settings.temperature,"num_predict":if request.settings.max_tokens == 0 { -1i64 } else { i64::from(request.settings.max_tokens) }});
         }
         Protocol::Anthropic => {
             body["system"] = json!(request.prompt);
-            body["max_tokens"] = json!(request.settings.max_tokens);
+            if request.settings.max_tokens > 0 {
+                body["max_tokens"] = json!(request.settings.max_tokens);
+            }
             body["temperature"] = json!(request.settings.temperature);
             if !tools.is_empty() {
                 body["tools"] = json!(tools.iter().map(|t| json!({"name":t["function"]["name"],"description":t["function"]["description"],"input_schema":t["function"]["parameters"]})).collect::<Vec<_>>());
@@ -244,10 +246,14 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
                 || model.starts_with("gpt-5")
                 || model.starts_with("gpt-6");
             if reasoning {
-                body["max_completion_tokens"] = json!(request.settings.max_tokens);
+                if request.settings.max_tokens > 0 {
+                    body["max_completion_tokens"] = json!(request.settings.max_tokens);
+                }
             } else {
                 body["temperature"] = json!(request.settings.temperature);
-                body["max_tokens"] = json!(request.settings.max_tokens);
+                if request.settings.max_tokens > 0 {
+                    body["max_tokens"] = json!(request.settings.max_tokens);
+                }
             }
         }
     }
@@ -261,10 +267,10 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
                     if model.contains("4-6") || model.contains("4-7") {
                         body["thinking"] = json!({"type":"adaptive"});
                     } else {
-                        if request.settings.max_tokens < 2048 {
+                        if request.settings.max_tokens > 0 && request.settings.max_tokens < 2048 {
                             bail!("开启思考需要至少 2048 个输出 token");
                         }
-                        body["thinking"] = json!({"type":"enabled","budget_tokens":(request.settings.max_tokens / 2).clamp(1024, 4096)});
+                        body["thinking"] = json!({"type":"enabled","budget_tokens":if request.settings.max_tokens == 0 {4096} else {(request.settings.max_tokens / 2).clamp(1024, 4096)}});
                     }
                     body.as_object_mut().unwrap().remove("temperature");
                 } else {
@@ -302,7 +308,133 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
     if !tools.is_empty() && request.provider.protocol != Protocol::Anthropic {
         body["tools"] = json!(tools);
     }
+    apply_parameters(
+        &mut body,
+        &request.settings.request_parameters,
+        &request.provider.protocol,
+    )?;
+    if let Some(config) = request
+        .provider
+        .model_configs
+        .get(&request.conversation.model)
+    {
+        apply_parameters(&mut body, &config.parameters, &request.provider.protocol)?;
+    }
+    if request.provider.protocol == Protocol::Anthropic {
+        let max = body["max_tokens"]
+            .as_u64()
+            .filter(|v| *v > 0)
+            .context("Claude 接口需要设置正整数 max_tokens，请在模型高级参数中填写输出上限")?;
+        if let Some(budget) = body["thinking"]["budget_tokens"].as_u64()
+            && budget >= max
+        {
+            bail!("思考预算 budget_tokens 必须小于 max_tokens，请调整模型高级参数");
+        }
+    }
     Ok(body)
+}
+
+pub fn validate_parameters(parameters: &serde_json::Map<String, Value>) -> Result<()> {
+    for key in ["model", "messages", "stream", "tools", "system"] {
+        if parameters.contains_key(key) {
+            bail!("{key} 由会话管理，不能作为模型参数覆盖");
+        }
+    }
+    for key in ["temperature", "top_p"] {
+        if let Some(value) = parameters.get(key)
+            && !value.is_null()
+        {
+            let number = value.as_f64().context(format!("{key} 必须是数字或 null"))?;
+            if !number.is_finite() || number < 0. || (key == "top_p" && number > 1.) {
+                bail!("{key} 数值无效");
+            }
+        }
+    }
+    for key in ["max_tokens", "max_completion_tokens"] {
+        if let Some(value) = parameters.get(key)
+            && !value.is_null()
+            && !value.as_u64().is_some_and(|v| v > 0)
+        {
+            bail!("{key} 必须是正整数或 null");
+        }
+    }
+    if let Some(value) = parameters.get("options")
+        && !value.is_null()
+        && !value.is_object()
+    {
+        bail!("options 必须是 JSON 对象或 null");
+    }
+    Ok(())
+}
+fn merge_parameter(target: &mut Value, patch: &Value) {
+    if let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) {
+        for (key, value) in patch {
+            if value.is_null() {
+                target.remove(key);
+            } else {
+                merge_parameter(target.entry(key.clone()).or_insert(Value::Null), value);
+            }
+        }
+    } else {
+        *target = patch.clone();
+    }
+}
+fn apply_parameters(
+    body: &mut Value,
+    parameters: &serde_json::Map<String, Value>,
+    protocol: &Protocol,
+) -> Result<()> {
+    validate_parameters(parameters)?;
+    for (key, value) in parameters {
+        let mapped = if *protocol == Protocol::Ollama {
+            match key.as_str() {
+                "max_tokens" | "max_completion_tokens" => Some("num_predict"),
+                "temperature" | "top_p" | "top_k" | "min_p" | "seed" | "repeat_penalty"
+                | "num_ctx" | "num_predict" | "stop" | "presence_penalty" | "frequency_penalty"
+                | "repeat_last_n" => Some(key.as_str()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(mapped) = mapped {
+            if !body["options"].is_object() {
+                body["options"] = json!({});
+            }
+            if value.is_null() {
+                body["options"].as_object_mut().unwrap().remove(mapped);
+            } else {
+                body["options"][mapped] = value.clone();
+            }
+        } else {
+            let model = body["model"]
+                .as_str()
+                .unwrap_or("")
+                .rsplit('/')
+                .next()
+                .unwrap_or("");
+            let reasoning = ["o1", "o3", "o4", "gpt-5", "gpt-6"]
+                .iter()
+                .any(|prefix| model.starts_with(prefix));
+            let mapped = if key == "max_tokens" && *protocol == Protocol::OpenAi && reasoning {
+                "max_completion_tokens"
+            } else {
+                key
+            };
+            if value.is_null() {
+                body.as_object_mut().unwrap().remove(mapped);
+            } else {
+                merge_parameter(
+                    body.as_object_mut()
+                        .unwrap()
+                        .entry(mapped)
+                        .or_insert(Value::Null),
+                    value,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -555,6 +687,8 @@ pub fn run(request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool>) {
                 return Ok(());
             }
             let mut message = Message::new("assistant", "");
+            message.model_id = request.conversation.model.clone();
+            message.provider_id = request.provider.id.clone();
             stream(
                 &request,
                 &history,
@@ -701,6 +835,74 @@ pub fn speak(
 mod tests {
     use super::*;
     use crate::test_support::{Response, server};
+    #[test]
+    fn model_parameters_override_globals_and_follow_native_protocols() {
+        for protocol in [Protocol::OpenAi, Protocol::Ollama, Protocol::Anthropic] {
+            let mut req = request(protocol.clone(), "http://localhost".into());
+            req.settings.max_tokens = 0;
+            req.settings.request_parameters =
+                serde_json::from_value(json!({"top_p":0.5,"options":{"num_ctx":32000,"seed":2}}))
+                    .unwrap();
+            let config=ModelConfig {name:"千问3 8B".into(),parameters:serde_json::from_value(json!({"temperature":0.4,"top_p":0.9,"max_tokens":32768,"options":{"seed":42},"stop":["END"],"custom_vendor_flag":true})).unwrap()};
+            req.provider.model_configs.insert("fixture".into(), config);
+            let value = body(&req, &[], &[]).unwrap();
+            assert_eq!(value["model"], "fixture");
+            assert_eq!(
+                if protocol == Protocol::Ollama {
+                    &value["options"]["stop"]
+                } else {
+                    &value["stop"]
+                },
+                &json!(["END"])
+            );
+            assert_eq!(value["custom_vendor_flag"], true);
+            assert_eq!(value["options"]["seed"], 42);
+            assert_eq!(value["options"]["num_ctx"], 32000);
+            let sample = if protocol == Protocol::Ollama {
+                &value["options"]
+            } else {
+                &value
+            };
+            assert_eq!(sample["temperature"], 0.4);
+            assert_eq!(sample["top_p"], 0.9);
+            assert_eq!(
+                sample[if protocol == Protocol::Ollama {
+                    "num_predict"
+                } else {
+                    "max_tokens"
+                }],
+                32768
+            );
+        }
+    }
+    #[test]
+    fn default_limits_are_optional_and_reasoning_parameters_use_completion_tokens() {
+        let mut req = request(Protocol::OpenAi, "http://localhost".into());
+        req.settings = Settings::default();
+        let value = body(&req, &[], &[]).unwrap();
+        assert!(value.get("max_tokens").is_none());
+        req.provider.protocol = Protocol::Ollama;
+        assert_eq!(body(&req, &[], &[]).unwrap()["options"]["num_predict"], -1);
+        req.provider.protocol = Protocol::Anthropic;
+        assert!(
+            body(&req, &[], &[])
+                .unwrap_err()
+                .to_string()
+                .contains("max_tokens")
+        );
+        req.provider.protocol = Protocol::OpenAi;
+        req.conversation.model = "o3".into();
+        req.settings.request_parameters = serde_json::from_value(
+            json!({"max_tokens":50000,"temperature":null,"reasoning_effort":"high"}),
+        )
+        .unwrap();
+        let value = body(&req, &[], &[]).unwrap();
+        assert_eq!(value["max_completion_tokens"], 50000);
+        assert!(value.get("max_tokens").is_none());
+        assert!(value.get("temperature").is_none());
+        req.settings.request_parameters = serde_json::from_value(json!({"stream":false})).unwrap();
+        assert!(body(&req, &[], &[]).is_err());
+    }
     fn request(protocol: Protocol, base_url: String) -> Request {
         let provider = Provider {
             id: id(),
@@ -708,6 +910,7 @@ mod tests {
             protocol,
             base_url,
             models: vec!["fixture".into()],
+            model_configs: Default::default(),
             enabled: true,
         };
         let mut conversation =
@@ -717,7 +920,10 @@ mod tests {
             provider,
             conversation,
             prompt: "Be helpful".into(),
-            settings: Settings::default(),
+            settings: Settings {
+                max_tokens: 16384,
+                ..Settings::default()
+            },
         }
     }
     #[test]
@@ -761,6 +967,8 @@ mod tests {
                 .next_back()
                 .unwrap();
             assert_eq!(last.content, "你好，世界");
+            assert_eq!(last.model_id, "fixture");
+            assert!(!last.provider_id.is_empty());
             assert_eq!(last.tokens, 4);
             let (header, body) = requests.recv().unwrap();
             assert!(header.contains(match protocol {

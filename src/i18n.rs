@@ -8,6 +8,7 @@ pub fn tr(text: &str) -> String {
         return text.into();
     }
     for (prefix, english) in [
+        ("模型设置无效：", "Invalid model settings: "),
         ("服务商返回 ", "Provider returned "),
         ("获取模型失败：", "Failed to fetch models: "),
         ("保存失败：", "Save failed: "),
@@ -25,6 +26,24 @@ pub fn tr(text: &str) -> String {
         }
     }
     match text {
+        "模型 ID" => "Model ID",
+        "模型与高级参数" => "Models and parameters",
+        "添加模型" => "Add model",
+        "模型高级参数" => "Model parameters",
+        "移除模型" => "Remove model",
+        "连接获取模型，或手动添加模型。" => "Fetch models from the provider or add one manually.",
+        "显示名称（留空使用模型 ID）" => "Display name (defaults to model ID)",
+        "输出上限（tokens）" => "Output limit (tokens)",
+        "更多参数（JSON）" => "Additional parameters (JSON)",
+        "保存模型设置" => "Save model settings",
+        "模型设置已保存" => "Model settings saved",
+        "返回连接设置" => "Back to connection settings",
+        "服务商默认" => "Provider default",
+        "默认使用模型 ID" => "Defaults to model ID",
+        "不设置客户端上限" => "No client limit",
+        "采样参数留空使用服务商默认；输出留空不设置客户端上限。Claude 必须填写输出上限。" => "Leave sampling blank for provider defaults; blank output sets no client limit. Claude requires an explicit output limit.",
+        "支持 top_k、seed、stop、惩罚、reasoning_effort，以及 options 等服务商原生嵌套参数。null 表示不发送该参数。" => "Supports top_k, seed, stop, penalties, reasoning_effort and nested provider options. null omits a parameter.",
+        "最长输出（0 = 不设置上限）" => "Output limit (0 = no client limit)",
         "剪贴板图片过大" => "Clipboard image is too large",
 
         "正在添加附件…" => "Adding attachments…",

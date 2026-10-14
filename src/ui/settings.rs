@@ -152,7 +152,6 @@ impl Mori {
                 .child(field("更多参数（JSON）",Textarea::new(&self.model_parameters).font_family("Cascadia Code"),p))
                 .child(label("支持 top_k、seed、stop、惩罚、reasoning_effort，以及 options 等服务商原生嵌套参数。null 表示不发送该参数。",p.muted))
                 .child(div().flex().gap_2()
-                    .child(Button::new("save-model-config").primary().label(tr("保存模型设置")).on_click(cx.listener(|this,_,_,cx|this.save_model(cx))))
                     .child(button("cancel-model-config","取消","x").on_click(cx.listener(|this,_,_,cx|{this.model_editor=false;cx.notify();}))))))
     }
     pub(super) fn set_language(

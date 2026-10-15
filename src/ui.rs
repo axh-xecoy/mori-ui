@@ -510,7 +510,7 @@ impl Mori {
                 .update(cx, |s, cx| s.set_value(draft, window, cx));
         }
         this.load_provider(0, window, cx);
-        this.load_assistant(0, window, cx);
+        this.sync_conversation_assistant(window, cx);
         this.load_advanced(window, cx);
         cx.spawn(async move |entity, cx| {
             loop {
@@ -606,8 +606,11 @@ impl Mori {
             .library
             .preferred_model(self.current(), self.selected_provider);
         let assistant = self
-            .current()
-            .map(|c| c.assistant_id.clone())
+            .library
+            .assistants
+            .get(self.selected_assistant)
+            .or_else(|| self.library.assistants.first())
+            .map(|a| a.id.clone())
             .unwrap_or_else(|| "general".into());
         let mut c = Conversation::new(provider, model, assistant);
         c.title = tr("新的对话");
@@ -625,6 +628,7 @@ impl Mori {
     fn select_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.stash_draft(cx);
         self.library.active_id = Some(id);
+        self.sync_conversation_assistant(window, cx);
         let draft = self.current().map(|c| c.draft.clone()).unwrap_or_default();
         self.composer
             .update(cx, |s, cx| s.set_value(draft, window, cx));
@@ -763,6 +767,18 @@ impl Mori {
             .update(cx, |s, cx| s.set_value(normalized, window, cx));
         cx.notify();
         true
+    }
+    fn sync_conversation_assistant(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self
+            .current()
+            .and_then(|c| {
+                self.library
+                    .assistants
+                    .iter()
+                    .position(|a| a.id == c.assistant_id)
+            })
+            .unwrap_or(0);
+        self.load_assistant(index, window, cx);
     }
     fn load_assistant(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_assistant = index;

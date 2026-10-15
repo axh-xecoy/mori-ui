@@ -410,6 +410,38 @@ print(greet("Mori"))
             let result=handle.update(cx,|_,window,cx|{let _=window.draw(cx);window.render_to_image().unwrap().save(directory.join(format!("{name}.png"))).unwrap();});
             eprintln!("emphasis and multiline header {name}: {result:?}");
         }
+        let result=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx| {
+                this.load_assistant(1,window,cx);
+                let expected=this.library.assistants[1].id.clone();
+                this.new_chat(window,cx);
+                let first=this.current().unwrap().id.clone();
+                assert_eq!(this.current().unwrap().assistant_id,expected);
+                this.load_assistant(2,window,cx);this.new_chat(window,cx);
+                assert_eq!(this.current().unwrap().assistant_id,this.library.assistants[2].id);
+                this.select_chat(first,window,cx);
+                assert_eq!(this.selected_assistant,1);
+                assert_eq!(this.assistant_prompt.read(cx).value().as_ref(),this.library.assistants[1].prompt);
+                this.new_chat(window,cx);
+                assert_eq!(this.current().unwrap().assistant_id,expected);
+                this.composer.update(cx,|s,cx|{s.set_value("",window,cx);s.focus(window,cx);});
+                let conversation=this.current().unwrap().id.clone();let (_,rx)=mpsc::channel();
+                this.generation=Some(Generation {conversation,rx,cancel:Arc::new(AtomicBool::new(false))});
+                cx.notify();
+            });let _=window.draw(cx);
+            view.update(cx,|this,cx| {
+                this.composer.update(cx,|state,cx|state.replace_text_in_range(None,"回复期间准备下一条消息",window,cx));
+                assert_eq!(this.composer.read(cx).value().as_ref(),"回复期间准备下一条消息");
+                this.send(window,cx);
+                assert!(this.generation.is_some());
+                assert!(this.current().unwrap().messages.is_empty());
+                this.stop(cx);
+                assert_eq!(this.composer.read(cx).value().as_ref(),"回复期间准备下一条消息");
+                this.stash_draft(cx);
+                assert_eq!(this.current().unwrap().draft,"回复期间准备下一条消息");
+            });
+        });
+        eprintln!("assistant selection and streaming draft regression: {result:?}");
         EXPORT_PROBE.with(|count|count.set(Some(0)));
         let _=handle.update(cx,|_,window,cx| {
             view.update(cx,|this,cx|{this.show_toast("关闭提示不应触发下方的导出按钮".into());cx.notify();});

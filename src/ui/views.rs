@@ -1211,7 +1211,6 @@ impl Mori {
                             })
                             .appearance(false)
                             .bordered(false)
-                            .disabled(busy)
                             .w_full(),
                     )
                     .child(
@@ -1797,15 +1796,7 @@ impl Mori {
                             .child(
                                 button("use-assistant", "开始对话", "arrow-up-right").on_click(
                                     cx.listener(|this, _, w, cx| {
-                                        let aid = this.library.assistants[this.selected_assistant]
-                                            .id
-                                            .clone();
                                         this.new_chat(w, cx);
-                                        if let Some(c) = this.current_mut() {
-                                            c.assistant_id = aid;
-                                        }
-                                        this.persist();
-                                        cx.notify();
                                     }),
                                 ),
                             )

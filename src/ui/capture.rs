@@ -2,6 +2,20 @@ use super::*;
 
 thread_local! {
     static TOOL_SCROLLS: std::cell::RefCell<std::collections::HashMap<String, ScrollHandle>> = Default::default();
+    static CODE_EDITORS: std::cell::RefCell<std::collections::HashMap<String, Entity<gpui_kit::component::input::EditorState>>> = Default::default();
+    static ROW_RENDERS: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};
+}
+
+pub(super) fn record_code_editor(
+    key: &str,
+    state: &Entity<gpui_kit::component::input::EditorState>,
+) {
+    CODE_EDITORS.with(|editors| {
+        editors.borrow_mut().insert(key.into(), state.clone());
+    });
+}
+pub(super) fn record_message_row() {
+    ROW_RENDERS.with(|count| count.set(count.get() + 1));
 }
 
 pub(super) fn record_tool_scroll(key: &str, handle: &ScrollHandle) {
@@ -17,6 +31,11 @@ pub fn start(
     cx: &mut App,
 ) {
     std::fs::create_dir_all(&directory).expect("snapshot directory");
+    let failure_path = directory.join("failure.txt");
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = std::fs::write(&failure_path, info.to_string());
+        eprintln!("{info}");
+    }));
     view.update(cx, |this, _| {
         this.store = None;
         this.library.conversations.clear();
@@ -25,7 +44,8 @@ pub fn start(
     cx.spawn(async move |cx| {
         let input_only=std::env::var_os("MORI_INPUT_CHECK_ONLY").is_some();
         let tools_only=std::env::var_os("MORI_TOOLS_CHECK_ONLY").is_some();
-        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu", "composer-narrow", "composer-narrow-models", "tool-collapsed", "tool-expanded", "tool-expanded-dark", "code-actions", "code-actions-dark", "code-actions-compact", "notice-visible", "notice-exiting", "notice-dismissed", "clipboard-attachments", "clipboard-ready", "model-revalidated", "model-empty", "sent-image", "sent-image-dark", "user-newlines", "user-newlines-dark", "user-newlines-compact", "model-parameters", "model-alias-chat", "model-parameters-compact", "model-parameters-english", "models-managed", "thinking-bar", "thinking-bar-expanded", "thinking-bar-dark", "llama-backend-settings"].into_iter().enumerate().filter(|(stage,_)| (!input_only||*stage==19)&&(!tools_only||*stage>=29)) {
+        let performance_only=std::env::var_os("MORI_PERF_CHECK_ONLY").is_some();
+        for (stage, name) in ["welcome", "chat", "models", "assistants", "tools", "settings", "dark", "compact", "rename", "deleted", "restored", "provider-saved", "math", "math-dark", "math-compact", "settings-general", "settings-connections", "settings-data", "settings-english", "composer-images", "sidebar-wide", "settings-compact", "connections-compact", "streaming-reply", "streaming-long", "conversation-menu", "thinking-menu", "composer-narrow", "composer-narrow-models", "tool-collapsed", "tool-expanded", "tool-expanded-dark", "code-actions", "code-actions-dark", "code-actions-compact", "notice-visible", "notice-exiting", "notice-dismissed", "clipboard-attachments", "clipboard-ready", "model-revalidated", "model-empty", "sent-image", "sent-image-dark", "user-newlines", "user-newlines-dark", "user-newlines-compact", "model-parameters", "model-alias-chat", "model-parameters-compact", "model-parameters-english", "models-managed", "thinking-bar", "thinking-bar-expanded", "thinking-bar-dark", "llama-backend-settings"].into_iter().enumerate().filter(|(stage,_)| (!input_only||*stage==19)&&(!tools_only||*stage>=29)&&(!performance_only||*stage==29)) {
             let _ = handle.update(cx, |_, window, cx| {
                 if stage==27 {window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),cx);}
                 view.update(cx, |this, cx| {
@@ -293,6 +313,61 @@ print(greet("Mori"))
             window.render_to_image().unwrap().save(directory.join("tool-output-scrolled.png")).unwrap();
         });
         eprintln!("tool output wheel containment regression: {result:?}");
+        let result=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx| {
+                this.new_chat(window,cx);this.toast=None;this.generation=None;
+                this.current_mut().unwrap().messages=(0..4000).map(|i|Message::new(if i%2==0 {"user"} else {"assistant"},format!("第 {i} 条历史消息。\n\n{}","这是一段用于检验虚拟列表的正常聊天内容。".repeat(8)))).collect();
+                this.scroll.set_offset(point(px(0.),px(0.)));cx.notify();
+            });
+            ROW_RENDERS.with(|n|n.set(0));
+            let started=std::time::Instant::now();let _=window.draw(cx);
+            let rows=ROW_RENDERS.with(|n|n.get());
+            eprintln!("performance history: 4000 messages, {rows} row constructions, first draw {:?}",started.elapsed());
+            assert!(rows<80,"Only nearby messages may be constructed");
+            std::fs::write(directory.join("performance-history.json"),serde_json::to_vec_pretty(&serde_json::json!({"messages":4000,"constructed_rows":rows,"first_draw_us":started.elapsed().as_micros() as u64})).unwrap()).unwrap();
+        });
+        eprintln!("history virtualization regression: {result:?}");
+        cx.background_executor().timer(Duration::from_millis(250)).await;
+        let _=handle.update(cx,|_,window,cx| {let _=window.draw(cx);window.render_to_image().unwrap().save(directory.join("performance-history.png")).unwrap();});
+        let long_code=(0..10000).map(|i|format!("const greeting{i} = '你好，世界 🌿';\n")).collect::<String>();
+        let _=handle.update(cx,|_,window,cx| {
+            CODE_EDITORS.with(|editors|editors.borrow_mut().clear());
+            view.update(cx,|this,cx| {
+                this.new_chat(window,cx);this.toast=None;
+                this.current_mut().unwrap().messages=vec![Message::new("assistant",format!("这是完整的长代码，支持选择、复制与下载。\n\n```javascript\n{long_code}```"))];
+                this.scroll.set_offset(point(px(0.),px(0.)));cx.notify();
+            });let _=window.draw(cx);
+        });
+        cx.background_executor().timer(Duration::from_millis(1200)).await;
+        let _=handle.update(cx,|_,window,cx|{let _=window.draw(cx);});
+        cx.background_executor().timer(Duration::from_millis(700)).await;
+        let result=handle.update(cx,|_,window,cx| {
+            let _=window.draw(cx);
+            let editor=CODE_EDITORS.with(|editors|editors.borrow().values().next().expect("Long code uses a virtualized editor").clone());
+            assert_eq!(editor.read(cx).value().as_ref(),long_code.trim_end_matches('\n'));
+            let rows=editor.read(cx).visible_row_range().unwrap();
+            eprintln!("performance code: 10000 lines, visible rows {rows:?}");
+            assert!(rows.len()<40,"Long code must only lay out visible rows");
+            assert!(!editor.read(cx).is_editable(),"Code preview must remain read-only");
+            let page_offset=view.read(cx).scroll.offset();
+            let bounds=editor.read(cx).cursor_layout().map(|(bounds,_)|bounds);
+            eprintln!("long code caret layout {bounds:?}");
+            let position=bounds.unwrap().origin+point(px(60.),px(80.));
+            window.dispatch_event(PlatformInput::ScrollWheel(ScrollWheelEvent {position,delta:ScrollDelta::Pixels(point(px(0.),px(-200.))),..Default::default()}),cx);
+            let _=window.draw(cx);
+            assert!(editor.read(cx).scroll_offset().y<px(0.),"Long code must scroll internally");
+            assert_eq!(view.read(cx).scroll.offset(),page_offset,"Code scrolling must not move the conversation");
+            let started=std::time::Instant::now();
+            view.update(cx,|this,cx|this.composer.update(cx,|state,cx|state.set_value("长代码显示期间输入仍可交互",window,cx)));
+            let _=window.draw(cx);
+            assert_eq!(view.read(cx).composer.read(cx).value().as_ref(),"长代码显示期间输入仍可交互");
+            assert_eq!(view.read(cx).scroll.offset(),page_offset);
+            eprintln!("performance code input update + draw {:?}",started.elapsed());
+            std::fs::write(directory.join("performance-code.json"),serde_json::to_vec_pretty(&serde_json::json!({"code_lines":10000,"visible_rows":rows.len(),"input_update_and_draw_us":started.elapsed().as_micros() as u64})).unwrap()).unwrap();
+            window.render_to_image().unwrap().save(directory.join("performance-code.png")).unwrap();
+        });
+        eprintln!("long code virtualization regression: {result:?}");
+        std::fs::write(directory.join("passed.txt"),"All native regressions passed.\n").unwrap();
         cx.update(|cx|cx.quit());
     }).detach();
 }

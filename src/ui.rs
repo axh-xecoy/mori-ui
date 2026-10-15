@@ -76,6 +76,8 @@ use std::{
 #[cfg(feature = "visual-test")]
 mod capture;
 mod config;
+mod long_code;
+mod performance;
 mod settings;
 #[cfg(feature = "visual-test")]
 pub use capture::start as capture;
@@ -193,7 +195,8 @@ pub struct Mori {
     toast_dirty: bool,
     status: String,
     transcript: Option<String>,
-    scroll: ScrollHandle,
+    scroll: performance::ChatScroll,
+    text_cache: std::cell::RefCell<performance::TextCache>,
     follow_stream_offset: Option<Pixels>,
     work_tx: mpsc::Sender<Work>,
     work_rx: mpsc::Receiver<Work>,
@@ -472,7 +475,8 @@ impl Mori {
             toast,
             status: String::new(),
             transcript: None,
-            scroll: ScrollHandle::new(),
+            scroll: performance::ChatScroll::new(),
+            text_cache: Default::default(),
             follow_stream_offset: None,
             work_tx,
             work_rx,
@@ -1025,6 +1029,26 @@ impl Mori {
         for event in events {
             changed = true;
             match event {
+                Event::Delta(delta) => {
+                    if let Some(c) = self
+                        .library
+                        .conversations
+                        .iter_mut()
+                        .find(|c| Some(&c.id) == cid.as_ref())
+                    {
+                        if let Some(m) = c.messages.iter_mut().find(|m| m.id == delta.id) {
+                            m.content.push_str(&delta.content);
+                            m.reasoning.push_str(&delta.reasoning);
+                            m.tools = delta.tools;
+                            m.elapsed_ms = delta.elapsed_ms;
+                            m.tokens = delta.tokens;
+                        } else {
+                            c.messages.push(delta);
+                        }
+                        c.updated = chrono::Local::now();
+                    }
+                    self.status = "正在回复…".into();
+                }
                 Event::Message(message) => {
                     if let Some(c) = self
                         .library

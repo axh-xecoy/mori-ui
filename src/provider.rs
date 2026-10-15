@@ -19,6 +19,7 @@ use std::{
 
 pub enum Event {
     Message(Message),
+    Delta(Message),
     Approval(ToolCall, mpsc::Sender<bool>),
     Status(String),
     Error(String),
@@ -804,6 +805,8 @@ fn stream(
     let mut accumulator = Accumulator::default();
     let mut data = String::new();
     let mut published = Instant::now() - Duration::from_millis(80);
+    let mut published_content = 0;
+    let mut published_reasoning = 0;
     for line in BufReader::new(response).lines() {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
@@ -835,10 +838,19 @@ fn stream(
                 &request.provider.protocol,
                 serde_json::from_str(payload.trim())?,
             )?;
-            accumulator.apply(message);
-            message.elapsed_ms = start.elapsed().as_millis() as u64;
             if published.elapsed() >= Duration::from_millis(80) {
-                if tx.send(Event::Message(message.clone())).is_err() {
+                let mut delta = Message::new("assistant", &accumulator.output[published_content..]);
+                delta.id.clone_from(&message.id);
+                delta.provider_id.clone_from(&message.provider_id);
+                delta.model_id.clone_from(&message.model_id);
+                delta.context_note.clone_from(&message.context_note);
+                delta.reasoning = accumulator.reasoning[published_reasoning..].to_owned();
+                delta.tools = accumulator.calls.values().cloned().collect();
+                delta.tokens = accumulator.tokens;
+                delta.elapsed_ms = start.elapsed().as_millis() as u64;
+                published_content = accumulator.output.len();
+                published_reasoning = accumulator.reasoning.len();
+                if tx.send(Event::Delta(delta)).is_err() {
                     return Ok(());
                 }
                 published = Instant::now();
@@ -1270,6 +1282,47 @@ mod tests {
         );
         response.status = 400;
         response
+    }
+
+    #[test]
+    fn streamed_deltas_are_incremental_unicode_prefixes_and_final_snapshot_is_complete() {
+        let mut frames = vec![];
+        let mut expected = String::new();
+        for i in 0..1200 {
+            let text = format!("第 {i} 行：你好 🌿，流式内容必须完整。\n");
+            expected.push_str(&text);
+            frames.push(json!({"choices":[{"delta":{"content":text}}]}));
+        }
+        frames.push(json!({"choices":[{"delta":{},"finish_reason":"stop"}]}));
+        let (url, _requests, handle) = server(vec![Response::sse(&frames)]);
+        let req = request(Protocol::OpenAi, url);
+        let (tx, rx) = mpsc::channel();
+        run(req, tx, Arc::new(AtomicBool::new(false)));
+        let mut deltas = String::new();
+        let mut final_text = String::new();
+        let mut identity = None;
+        for event in rx.try_iter() {
+            match event {
+                Event::Delta(m) => {
+                    if let Some(id) = &identity {
+                        assert_eq!(id, &m.id);
+                    } else {
+                        identity = Some(m.id.clone());
+                    }
+                    deltas.push_str(&m.content);
+                }
+                Event::Message(m) => {
+                    assert_eq!(identity.as_ref(), Some(&m.id));
+                    final_text = m.content;
+                }
+                Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        assert!(!deltas.is_empty());
+        assert!(expected.starts_with(&deltas));
+        assert_eq!(final_text, expected);
+        handle.join().unwrap();
     }
 
     #[test]

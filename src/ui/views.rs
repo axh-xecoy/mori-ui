@@ -60,7 +60,7 @@ fn tool_output_preview(text: &str, language: &str) -> String {
     format!("{fence}{language}\n{preview}\n{fence}")
 }
 
-fn code_extension(language: &str) -> &'static str {
+pub(super) fn code_extension(language: &str) -> &'static str {
     match language
         .split_whitespace()
         .next()
@@ -100,9 +100,25 @@ impl Mori {
         use gpui_kit::component::{highlighter::HighlightTheme, text::TextViewStyle};
         let tx = self.work_tx.clone();
         let dark = self.library.settings.dark;
+        let id: ElementId = id.into();
+        let long_document = source.as_ref().len() > 32000
+            && source
+                .as_ref()
+                .split("```")
+                .step_by(2)
+                .map(str::len)
+                .sum::<usize>()
+                > 32000;
+        let code_key = format!("{id:?}");
+        let code_tx = tx.clone();
+        let (_, prepared) = self.text_cache.borrow_mut().get(
+            format!("markdown-{id:?}"),
+            source.as_ref(),
+            crate::math::normalize,
+        );
         let mut block_style = StyleRefinement::default().pt(px(40.)).max_h(px(320.));
         block_style.overflow.y = Some(Overflow::Scroll);
-        crate::math::markdown(id, source, color)
+        crate::math::markdown_prepared(id, prepared, color)
             .style(
                 TextViewStyle {
                     highlight_theme: if dark {
@@ -115,47 +131,17 @@ impl Mori {
                 }
                 .code_block(block_style),
             )
+            .markdown_block_parser(super::long_code::parse)
+            .markdown_block_renderer("mori-long-code", move |node, window, cx| {
+                super::long_code::render(node, &code_key, code_tx.clone(), window, cx)
+            })
+            .when(long_document, |view| view.scrollable(true).h(px(480.)))
             .code_block_actions(move |block, _, _| {
-                let language = block.lang().unwrap_or_else(|| "text".into()).to_string();
-                let code = block.code().to_string();
-                let download_code = code.clone();
-                let download_language = language.clone();
-                let tx = tx.clone();
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().text_xs().mr_2().child(language))
-                    .child(
-                        tiny("copy-code", "copy", "复制代码")
-                            .size(px(24.))
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                            }),
-                    )
-                    .child(
-                        tiny("download-code", "download", "下载代码")
-                            .size(px(24.))
-                            .on_click(move |_, _, _| {
-                                let code = download_code.clone();
-                                let language = download_language.clone();
-                                let tx = tx.clone();
-                                std::thread::spawn(move || {
-                                    let extension = code_extension(&language);
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .set_title(tr("保存代码"))
-                                        .set_file_name(format!("snippet.{extension}"))
-                                        .add_filter(tr("代码文件"), &[extension])
-                                        .save_file()
-                                    {
-                                        let result = std::fs::write(path, code.as_bytes())
-                                            .map(|_| "代码已保存".to_string())
-                                            .map_err(anyhow::Error::from);
-                                        let _ = tx.send(Work::Notice(result));
-                                    }
-                                });
-                            }),
-                    )
+                super::long_code::toolbar(
+                    block.code(),
+                    block.lang().unwrap_or_else(|| "text".into()).to_string(),
+                    tx.clone(),
+                )
             })
     }
 
@@ -527,11 +513,13 @@ impl Mori {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        #[cfg(feature = "visual-test")]
+        super::capture::record_message_row();
         let user = m.role == "user";
         // A selectable TextView has no intrinsic width through the extra bubble
         // wrapper. Size short user bubbles with the actual font, then let flex
         // shrink long messages to the available viewport width.
-        let user_width = if !m.attachments.is_empty() || m.content.len() > 600 {
+        let user_width = if !user || !m.attachments.is_empty() || m.content.len() > 600 {
             px(680.)
         } else {
             m.content
@@ -554,8 +542,11 @@ impl Mori {
                 .fold(px(72.), |width, line| width.max(line))
                 .min(px(680.))
         };
-        let text = m.content.clone();
-        let speak_text = m.content.clone();
+        let (text, _) =
+            self.text_cache
+                .borrow_mut()
+                .get(format!("source-{}", m.id), &m.content, str::to_owned);
+        let speak_text = text.clone();
         let expanded = self.expanded.contains(&m.id);
         let reasoning_id = m.id.clone();
         div()
@@ -703,7 +694,14 @@ impl Mori {
                                 let content = if user {
                                     TextView::html(
                                         format!("md-{}", m.id),
-                                        user_message_html(&m.content),
+                                        self.text_cache
+                                            .borrow_mut()
+                                            .get(
+                                                format!("user-{}", m.id),
+                                                &m.content,
+                                                user_message_html,
+                                            )
+                                            .1,
                                     )
                                     .style(
                                         gpui_kit::component::text::TextViewStyle {
@@ -978,7 +976,9 @@ impl Mori {
                             .when(user, |d| d.justify_end())
                             .child(tiny(format!("copy-{}", m.id), "copy", "复制消息").on_click(
                                 move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        text.to_string(),
+                                    ))
                                 },
                             ))
                             .child(
@@ -1004,7 +1004,9 @@ impl Mori {
                                     )
                                     .disabled(self.media_busy)
                                     .on_click(cx.listener(
-                                        move |this, _, _, cx| this.speak(speak_text.clone(), cx),
+                                        move |this, _, _, cx| {
+                                            this.speak(speak_text.to_string(), cx)
+                                        },
                                     )),
                                 )
                             })
@@ -1411,7 +1413,7 @@ impl Mori {
                     .child(label("回答可能有误，重要信息请核实。", p.muted)),
             )
     }
-    fn render_chat(&self, p: Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_chat(&self, p: Palette, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let c = self.current();
         let title = c.map(|c| c.title.as_str()).unwrap_or("新的对话");
         let model = c
@@ -1553,19 +1555,33 @@ impl Mori {
                             .child(if c.is_none_or(|c| c.messages.is_empty()) {
                                 self.render_welcome(p, cx).into_any_element()
                             } else {
+                                let conversation = c.unwrap();
+                                self.scroll.sync(conversation, &self.expanded);
+                                let view = cx.entity().downgrade();
                                 div()
                                     .id("messages")
                                     .flex_1()
                                     .min_h_0()
-                                    .overflow_y_scroll()
-                                    .track_scroll(&self.scroll)
-                                    .px_8()
                                     .child(
-                                        div().max_w(px(896.)).mx_auto().py_4().children(
-                                            c.unwrap().messages.iter().enumerate().map(|(i, m)| {
-                                                self.render_message(m, i, p, window, cx)
-                                            }),
-                                        ),
+                                        list(self.scroll.state.clone(), move |i, window, cx| {
+                                            view.update(cx, |this, cx| {
+                                                let Some(message) =
+                                                    this.current().and_then(|c| c.messages.get(i))
+                                                else {
+                                                    return div().into_any_element();
+                                                };
+                                                div()
+                                                    .px_8()
+                                                    .child(div().max_w(px(896.)).mx_auto().child(
+                                                        this.render_message(
+                                                            message, i, p, window, cx,
+                                                        ),
+                                                    ))
+                                                    .into_any_element()
+                                            })
+                                            .unwrap_or_else(|_| div().into_any_element())
+                                        })
+                                        .size_full(),
                                     )
                                     .into_any_element()
                             })

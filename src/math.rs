@@ -227,8 +227,12 @@ pub fn normalize(source: &str) -> String {
     result
 }
 
-pub fn markdown(id: impl Into<ElementId>, source: impl AsRef<str>, color: u32) -> TextView {
-    TextView::markdown(id, normalize(source.as_ref())).markdown_extensions(
+pub fn markdown_prepared(
+    id: impl Into<ElementId>,
+    source: impl Into<gpui_kit::SharedString>,
+    color: u32,
+) -> TextView {
+    TextView::markdown(id, source).markdown_extensions(
         MarkdownExtensions::default()
             .plugin(MathPlugin {
                 block: false,

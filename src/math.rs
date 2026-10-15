@@ -189,6 +189,35 @@ pub fn normalize(source: &str) -> String {
             continue;
         }
         if fence.is_none() && ticks == 0 {
+            if byte == b'<'
+                && let Some(tag) = ["code", "pre", "script", "style"]
+                    .iter()
+                    .find(|tag| rest.starts_with(&format!("<{tag}")))
+            {
+                let close = format!("</{tag}>");
+                let end = rest
+                    .find(&close)
+                    .map_or(rest.len(), |end| end + close.len());
+                result.push_str(&rest[..end]);
+                i += end;
+                continue;
+            }
+            if byte == b'<'
+                && rest
+                    .as_bytes()
+                    .get(1)
+                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'/' || *c == b'!')
+                && let Some(end) = rest.find('>')
+            {
+                result.push_str(&rest[..=end]);
+                i += end + 1;
+                continue;
+            }
+            if let Some((consumed, replacement)) = relaxed_emphasis(rest) {
+                result.push_str(&replacement);
+                i += consumed;
+                continue;
+            }
             let pair = if rest.starts_with("$$") {
                 Some(("$$", "$$", true))
             } else if rest.starts_with(r"\[") {
@@ -214,7 +243,19 @@ pub fn normalize(source: &str) -> String {
                 i += open.len() + end + close.len();
                 continue;
             }
-            if rest.starts_with(r"\$") || rest.starts_with(r"\\") {
+            if pair.is_some() {
+                result.push_str(rest);
+                break;
+            }
+            if byte == b'$'
+                && !rest.starts_with("$$")
+                && let Some(end) = rest[1..].split('\n').next().and_then(|s| s.find('$'))
+            {
+                result.push_str(&rest[..end + 2]);
+                i += end + 2;
+                continue;
+            }
+            if byte == b'\\' && rest.as_bytes().get(1).is_some_and(u8::is_ascii_punctuation) {
                 result.push_str(&rest[..2]);
                 i += 2;
                 continue;
@@ -225,6 +266,72 @@ pub fn normalize(source: &str) -> String {
         i += ch.len_utf8();
     }
     result
+}
+
+// AI replies frequently put spaces inside paired emphasis, or put CJK quotes
+// directly against surrounding text. CommonMark intentionally treats those
+// delimiter runs as literal. Repair only paired CJK prose, never arbitrary
+// unmatched stars, arithmetic, code, math, or HTML.
+fn relaxed_emphasis(source: &str) -> Option<(usize, String)> {
+    let run = source.bytes().take_while(|c| *c == b'*').count();
+    if !(1..=3).contains(&run) {
+        return None;
+    }
+    let marker = &source[..run];
+    let rest = &source[run..];
+    let line = rest.split('\n').next()?;
+    let end = line.find(marker)?;
+    if line.as_bytes().get(end + run) == Some(&b'*') {
+        return None;
+    }
+    let body = &line[..end];
+    let trimmed = body.trim();
+    if trimmed.is_empty()
+        || body.contains(['`', '$', '<', '>', '\\'])
+        || !body
+            .chars()
+            .any(|c| matches!(c,'\u{3400}'..='\u{9fff}'|'\u{f900}'..='\u{faff}'))
+    {
+        return None;
+    }
+    let cjk_punctuation = |c: char| {
+        c.is_ascii_punctuation()
+            || matches!(
+                c,
+                '“' | '”'
+                    | '‘'
+                    | '’'
+                    | '「'
+                    | '」'
+                    | '『'
+                    | '』'
+                    | '（'
+                    | '）'
+                    | '【'
+                    | '】'
+                    | '《'
+                    | '》'
+                    | '，'
+                    | '。'
+                    | '！'
+                    | '？'
+                    | '：'
+                    | '；'
+                    | '、'
+            )
+    };
+    if body == trimmed
+        && !trimmed.starts_with(cjk_punctuation)
+        && !trimmed.ends_with(cjk_punctuation)
+    {
+        return None;
+    }
+    let (open, close) = match run {
+        1 => ("<em>", "</em>"),
+        2 => ("<strong>", "</strong>"),
+        _ => ("<strong><em>", "</em></strong>"),
+    };
+    Some((run + end + run, format!("{open}{trimmed}{close}")))
 }
 
 pub fn markdown_prepared(
@@ -246,6 +353,69 @@ pub fn markdown_prepared(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paired_cjk_emphasis_handles_spaces_quotes_and_combined_styles() {
+        for (source, expected) in [
+            (
+                "定位为** “产品经理” **。",
+                "定位为<strong>“产品经理”</strong>。",
+            ),
+            (
+                "这是**“中文引号”**后面的正文。",
+                "这是<strong>“中文引号”</strong>后面的正文。",
+            ),
+            (
+                "这是**\"中文引号\"**正文。",
+                "这是<strong>\"中文引号\"</strong>正文。",
+            ),
+            (
+                "测试* 斜体 *与*** 粗斜体 ***。",
+                "测试<em>斜体</em>与<strong><em>粗斜体</em></strong>。",
+            ),
+            (
+                "正常 **粗体**、*斜体*、***粗斜体***。",
+                "正常 **粗体**、*斜体*、***粗斜体***。",
+            ),
+        ] {
+            assert_eq!(normalize(source), expected);
+            let html = markdown::to_html(&normalize(source));
+            assert!(!html.contains("**"), "{html}");
+        }
+        let html = markdown::to_html_with_options(
+            &normalize("*** 粗斜体 ***"),
+            &markdown::Options {
+                compile: markdown::CompileOptions {
+                    allow_dangerous_html: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(html.contains("<strong><em>粗斜体</em></strong>"));
+    }
+
+    #[test]
+    fn emphasis_compatibility_preserves_literals_math_code_and_streaming_prefixes() {
+        for source in [
+            "```markdown\n** 中文 **\n*** 粗斜体 ***\n```",
+            "`** 中文 **` 与 ``* 中文 *``",
+            r"\*\* 中文 \*\* 与 2 * 3 * 4",
+            "正在输出 ** 中文",
+            "正在输出 *** 中文",
+            "***\n* 列表\n* 列表\n\n** **",
+            "$a ** 中文 ** b$",
+            "<span title='** 中文 **'>内容</span>",
+            "<code>** 中文 **</code>",
+            "$$x ** 中文 **",
+        ] {
+            assert_eq!(normalize(source), source, "{source}");
+        }
+        assert_eq!(
+            normalize("** 中文 **\n\n***"),
+            "<strong>中文</strong>\n\n***"
+        );
+    }
     #[test]
     fn model_math_delimiters_preserve_code_and_incomplete_streams() {
         let code = "```latex\n$$x^2$$\n\\[x\\]\n```\n`$$x$$`";

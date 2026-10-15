@@ -1415,7 +1415,12 @@ impl Mori {
     }
     fn render_chat(&self, p: Palette, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let c = self.current();
-        let title = c.map(|c| c.title.as_str()).unwrap_or("新的对话");
+        let title = c
+            .map(|c| c.title.as_str())
+            .unwrap_or("新的对话")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let model = c
             .filter(|c| !c.model.is_empty())
             .map(|c| {
@@ -1455,6 +1460,8 @@ impl Mori {
                             .flex()
                             .items_center()
                             .gap_3()
+                            .flex_1()
+                            .min_w_0()
                             .child(
                                 tiny("sidebar-toggle", "panel-left", "显示或隐藏侧栏").on_click(
                                     cx.listener(|this, _, _, cx| {
@@ -1468,13 +1475,25 @@ impl Mori {
                                     .flex()
                                     .flex_col()
                                     .gap_1()
+                                    .flex_1()
+                                    .min_w_0()
                                     .child(
                                         div()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_sm()
-                                            .child(title.to_string()),
+                                            .truncate()
+                                            .child(title),
                                     )
-                                    .child(label(assistant.to_string(), p.muted)),
+                                    .child(
+                                        label(
+                                            assistant
+                                                .split_whitespace()
+                                                .collect::<Vec<_>>()
+                                                .join(" "),
+                                            p.muted,
+                                        )
+                                        .truncate(),
+                                    ),
                             ),
                     )
                     .child(
@@ -1482,8 +1501,12 @@ impl Mori {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .flex_shrink_0()
+                            .ml_3()
                             .child(
                                 button("model-picker", model.to_string(), "chevrons-up-down")
+                                    .max_w(px(240.))
+                                    .overflow_hidden()
                                     .bg(rgb(p.soft))
                                     .text_color(rgb(p.accent))
                                     .on_click(cx.listener(|this, _, _, cx| {

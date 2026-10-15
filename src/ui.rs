@@ -854,7 +854,13 @@ impl Mori {
         message.attachments = std::mem::take(&mut self.attachments);
         let c = self.current_mut().unwrap();
         if c.messages.is_empty() {
-            c.title = text.trim().chars().take(24).collect();
+            c.title = text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(24)
+                .collect();
             if c.title.is_empty() {
                 c.title = "聊聊这份资料".into();
             }

@@ -367,6 +367,38 @@ print(greet("Mori"))
             window.render_to_image().unwrap().save(directory.join("performance-code.png")).unwrap();
         });
         eprintln!("long code virtualization regression: {result:?}");
+        for (dark,width,name) in [(false,1280.,"emphasis-header"),(false,900.,"emphasis-header-compact"),(true,1280.,"emphasis-header-dark")] {
+            let _=handle.update(cx,|_,window,cx| {
+                view.update(cx,|this,cx| {
+                    this.new_chat(window,cx);this.toast=None;this.sidebar=false;this.library.settings.dark=dark;
+                    Theme::change(if dark {ThemeMode::Dark} else {ThemeMode::Light},Some(window),cx);Mori::tint(cx,dark);
+                    window.resize(size(px(width),px(860.)));
+                    let c=this.current_mut().unwrap();c.title="自己想当创作者，想发自己的作品吸引粉丝\n但又总是担心产品不够好，所以希望获得更清晰的建议与行动方案。".repeat(4);
+                    c.messages=vec![Message::new("assistant",r#"## 强调格式检查
+
+正常格式：*斜体*、**粗体**、***粗斜体***。
+
+英文格式：*Italic ABC*、**Bold ABC**、***Both ABC***。
+
+模型多写空格：* 中文斜体 *、** 中文粗体 **、*** 中文粗斜体 ***。
+
+中文标点：这是**“产品经理”**的定位，也是**「用户价值」**的表达。
+
+不要把自己定位为“写代码的人”，要定位为** “为特定玩家群体提供解决方案的产品经理” **。
+
+嵌套格式：**外层粗体与*内层斜体*共同显示**。
+
+原样内容：`** 中文 **`、\*\*转义星号\*\*、2 * 3 * 4。
+
+公式保持原样：$a*b*c$。
+"#)];
+                    this.scroll.set_offset(point(px(0.),px(0.)));cx.notify();
+                });let _=window.draw(cx);
+            });
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            let result=handle.update(cx,|_,window,cx|{let _=window.draw(cx);window.render_to_image().unwrap().save(directory.join(format!("{name}.png"))).unwrap();});
+            eprintln!("emphasis and multiline header {name}: {result:?}");
+        }
         std::fs::write(directory.join("passed.txt"),"All native regressions passed.\n").unwrap();
         cx.update(|cx|cx.quit());
     }).detach();

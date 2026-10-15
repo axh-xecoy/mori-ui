@@ -36,6 +36,9 @@ ratex-render = { version = "=0.1.14", features = ["embed-fonts"] }
 [build-dependencies]
 embed-resource = "=3.0.12"
 
+[dev-dependencies]
+markdown = "=1.0.0"
+
 [profile.dev]
 debug = 0
 

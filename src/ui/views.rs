@@ -1943,59 +1943,73 @@ impl Render for Mori {
                         Page::Settings => self.render_settings(p, cx).into_any_element(),
                     })
                     .when_some(self.toast.clone(), |d, text| {
+                        // Animate only the visual child. The stationary hitbox
+                        // must cover the header until the exit animation ends.
                         d.child(
                             div()
+                                .id("toast-hit-shield")
                                 .absolute()
                                 .top_0()
                                 .left_0()
                                 .right_0()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .px_6()
-                                .py_3()
-                                .bg(rgb(p.soft))
-                                .border_b_1()
-                                .border_color(rgb(p.line))
-                                .child(div().text_sm().flex_1().child(tr(&text)))
-                                .when(self.show_undo_delete(), |d| {
-                                    d.child(button("undo-delete", "撤销删除", "undo-2").on_click(
-                                        cx.listener(|this, _, w, cx| {
-                                            this.undo_delete(w, cx);
-                                        }),
-                                    ))
-                                })
-                                .child(tiny("dismiss-toast", "x", "关闭提示").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.dismiss_toast();
-                                        cx.notify();
-                                    }),
-                                ))
-                                .with_animation(
-                                    format!(
-                                        "notice-{}-{}",
-                                        self.toast_revision,
-                                        self.toast_closing.is_some()
-                                    ),
-                                    Animation::new(Duration::from_millis(
-                                        if self.toast_closing.is_some() {
-                                            300
-                                        } else {
-                                            180
-                                        },
-                                    ))
-                                    .with_easing(|t: f32| 1. - (1. - t).powi(3)),
-                                    {
-                                        let closing = self.toast_closing.is_some();
-                                        move |d, progress| {
-                                            if closing {
-                                                d.top(px(-48. * progress)).opacity(1. - progress)
-                                            } else {
-                                                d.top(px(-24. * (1. - progress))).opacity(progress)
-                                            }
-                                        }
-                                    },
+                                .occlude()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    div()
+                                        .relative()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_3()
+                                        .px_6()
+                                        .py_3()
+                                        .bg(rgb(p.soft))
+                                        .border_b_1()
+                                        .border_color(rgb(p.line))
+                                        .child(div().text_sm().flex_1().child(tr(&text)))
+                                        .when(self.show_undo_delete(), |d| {
+                                            d.child(
+                                                button("undo-delete", "撤销删除", "undo-2")
+                                                    .on_click(cx.listener(|this, _, w, cx| {
+                                                        this.undo_delete(w, cx);
+                                                    })),
+                                            )
+                                        })
+                                        .child(tiny("dismiss-toast", "x", "关闭提示").on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.dismiss_toast();
+                                                cx.notify();
+                                            }),
+                                        ))
+                                        .with_animation(
+                                            format!(
+                                                "notice-{}-{}",
+                                                self.toast_revision,
+                                                self.toast_closing.is_some()
+                                            ),
+                                            Animation::new(Duration::from_millis(
+                                                if self.toast_closing.is_some() {
+                                                    300
+                                                } else {
+                                                    180
+                                                },
+                                            ))
+                                            .with_easing(|t: f32| 1. - (1. - t).powi(3)),
+                                            {
+                                                let closing = self.toast_closing.is_some();
+                                                move |d, progress| {
+                                                    if closing {
+                                                        d.top(px(-48. * progress))
+                                                            .opacity(1. - progress)
+                                                    } else {
+                                                        d.top(px(-24. * (1. - progress)))
+                                                            .opacity(progress)
+                                                    }
+                                                }
+                                            },
+                                        ),
                                 ),
                         )
                     }),

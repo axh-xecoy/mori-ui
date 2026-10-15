@@ -4,6 +4,17 @@ thread_local! {
     static TOOL_SCROLLS: std::cell::RefCell<std::collections::HashMap<String, ScrollHandle>> = Default::default();
     static CODE_EDITORS: std::cell::RefCell<std::collections::HashMap<String, Entity<gpui_kit::component::input::EditorState>>> = Default::default();
     static ROW_RENDERS: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};
+    static EXPORT_PROBE: std::cell::Cell<Option<usize>> = const {std::cell::Cell::new(None)};
+}
+
+pub(super) fn record_export_click() -> bool {
+    EXPORT_PROBE.with(|count| match count.get() {
+        Some(n) => {
+            count.set(Some(n + 1));
+            true
+        }
+        None => false,
+    })
 }
 
 pub(super) fn record_code_editor(
@@ -399,6 +410,41 @@ print(greet("Mori"))
             let result=handle.update(cx,|_,window,cx|{let _=window.draw(cx);window.render_to_image().unwrap().save(directory.join(format!("{name}.png"))).unwrap();});
             eprintln!("emphasis and multiline header {name}: {result:?}");
         }
+        EXPORT_PROBE.with(|count|count.set(Some(0)));
+        let _=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx|{this.show_toast("关闭提示不应触发下方的导出按钮".into());cx.notify();});
+            let _=window.draw(cx);
+        });
+        cx.background_executor().timer(Duration::from_millis(250)).await;
+        let result=handle.update(cx,|_,window,cx| {
+            let _=window.draw(cx);
+            let position=point(px(1280.-39.),px(30.));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+            assert!(view.read(cx).toast_closing.is_some(),"The close button must respond");
+            assert_eq!(EXPORT_PROBE.with(|count|count.get()),Some(0),"Closing must not activate export underneath");
+            let _=window.draw(cx);
+        });
+        eprintln!("toast close click containment: {result:?}");
+        cx.background_executor().timer(Duration::from_millis(120)).await;
+        let result=handle.update(cx,|_,window,cx| {
+            let _=window.draw(cx);let position=point(px(1280.-39.),px(30.));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+            assert_eq!(EXPORT_PROBE.with(|count|count.get()),Some(0),"Exit animation must keep its original click shield");
+        });
+        eprintln!("toast exit animation click containment: {result:?}");
+        cx.background_executor().timer(Duration::from_millis(350)).await;
+        let result=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx|this.poll(cx));let _=window.draw(cx);
+            assert!(view.read(cx).toast.is_none());
+            let position=point(px(1280.-39.),px(30.));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+            assert_eq!(EXPORT_PROBE.with(|count|count.get()),Some(1),"Export must remain clickable once the toast is gone");
+        });
+        eprintln!("toast shield removal restores export: {result:?}");
+        EXPORT_PROBE.with(|count|count.set(None));
         std::fs::write(directory.join("passed.txt"),"All native regressions passed.\n").unwrap();
         cx.update(|cx|cx.quit());
     }).detach();

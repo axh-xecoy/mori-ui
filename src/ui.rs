@@ -1335,6 +1335,10 @@ impl Mori {
         cx.notify();
     }
     fn export(&mut self, all: bool) {
+        #[cfg(feature = "visual-test")]
+        if capture::record_export_click() {
+            return;
+        }
         let tx = self.work_tx.clone();
         let library = self.library.clone();
         let current = self.current().cloned();

@@ -1,4 +1,56 @@
 use super::*;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+
+#[derive(IntoElement)]
+struct ToolPreviewPanel {
+    key: String,
+    preview: String,
+    height: f32,
+}
+
+impl RenderOnce for ToolPreviewPanel {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let handle = window
+            .use_keyed_state(self.key.clone(), cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
+        #[cfg(feature = "visual-test")]
+        super::capture::record_tool_scroll(&self.key, &handle);
+        div()
+            .relative()
+            .min_w_0()
+            // Contain wheel events even when the inner scroller reaches an edge.
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .id(self.key.clone())
+                    .min_w_0()
+                    .max_h(px(self.height))
+                    .overflow_scroll()
+                    .track_scroll(&handle)
+                    .child(
+                        TextView::markdown(format!("text-{}", self.key), self.preview)
+                            .selectable(true),
+                    ),
+            )
+            .child(
+                div().absolute().inset_0().child(
+                    Scrollbar::new(&handle)
+                        .id(format!("bar-{}", self.key))
+                        .mode(ScrollbarMode::Always)
+                        .viewport_from_layout(),
+                ),
+            )
+    }
+}
+
+fn tool_preview_panel(key: String, text: &str, language: &str, height: f32) -> impl IntoElement {
+    ToolPreviewPanel {
+        key,
+        preview: tool_output_preview(text, language),
+        height,
+    }
+}
 
 fn tool_output_preview(text: &str, language: &str) -> String {
     let preview = text.chars().take(20000).collect::<String>();
@@ -830,21 +882,12 @@ impl Mori {
                                                     }),
                                                 ),
                                         )
-                                        .child(
-                                            div()
-                                                .id(format!("args-scroll-{key}"))
-                                                .max_h(px(120.))
-                                                .min_w_0()
-                                                .overflow_y_scroll()
-                                                .overflow_x_scroll()
-                                                .child(
-                                                    TextView::markdown(
-                                                        format!("call-{key}"),
-                                                        tool_output_preview(&args, "json"),
-                                                    )
-                                                    .selectable(true),
-                                                ),
-                                        )
+                                        .child(tool_preview_panel(
+                                            format!("args-scroll-{key}"),
+                                            &args,
+                                            "json",
+                                            120.,
+                                        ))
                                         .when_some(
                                             t.result.as_ref(),
                                             |d, result| {
@@ -884,21 +927,12 @@ impl Mori {
                                                             }),
                                                         ),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .id(format!("output-scroll-{key}"))
-                                                        .max_h(px(240.))
-                                                        .min_w_0()
-                                                        .overflow_y_scroll()
-                                                        .overflow_x_scroll()
-                                                        .child(
-                                                            TextView::markdown(
-                                                                format!("result-{key}"),
-                                                                tool_output_preview(result, "text"),
-                                                            )
-                                                            .selectable(true),
-                                                        ),
-                                                )
+                                                .child(tool_preview_panel(
+                                                    format!("output-scroll-{key}"),
+                                                    result,
+                                                    "text",
+                                                    240.,
+                                                ))
                                                 .when(clipped, |d| {
                                                     d.child(label(
                                                     "仅预览前 20,000 字符，可复制完整已保存结果",

@@ -1,5 +1,15 @@
 use super::*;
 
+thread_local! {
+    static TOOL_SCROLLS: std::cell::RefCell<std::collections::HashMap<String, ScrollHandle>> = Default::default();
+}
+
+pub(super) fn record_tool_scroll(key: &str, handle: &ScrollHandle) {
+    TOOL_SCROLLS.with(|handles| {
+        handles.borrow_mut().insert(key.into(), handle.clone());
+    });
+}
+
 pub fn start(
     handle: AnyWindowHandle,
     view: Entity<Mori>,
@@ -245,6 +255,43 @@ print(greet("Mori"))
         cx.background_executor().timer(Duration::from_millis(100)).await;
         let result=handle.update(cx,|_,_,cx|view.update(cx,|this,_|{assert_eq!(this.scroll.offset(),offset,"Streaming must not pull readers away from older messages");this.generation=None;}));
         eprintln!("streaming scroll regression: {result:?}");
+        let output_key=handle.update(cx,|_,window,cx| {
+            let key=view.update(cx,|this,cx| {
+                this.generation=None;this.status.clear();this.page=Page::Chat;this.toast=None;
+                this.new_chat(window,cx);this.toast=None;
+                let mut reply=Message::new("assistant","Bash 独立滚动检查");
+                reply.tools.push(ToolCall {id:"scroll-regression".into(),name:"bash".into(),arguments:r#"{"command":"cat game.html"}"#.into(),result:Some("中文输出很长，需要独立滚动。\n".repeat(1000))});
+                let key=format!("tool-{}-scroll-regression",reply.id);this.expanded.insert(key.clone());
+                let c=this.current_mut().unwrap();c.messages=vec![reply,Message::new("assistant","页面下方内容。\n\n".repeat(80))];
+                this.scroll.set_offset(point(px(0.),px(0.)));cx.notify();format!("output-scroll-{key}")
+            });let _=window.draw(cx);key
+        }).unwrap();
+        cx.background_executor().timer(Duration::from_millis(200)).await;
+        let result=handle.update(cx,|_,window,cx| {
+            let _=window.draw(cx);
+            let output=TOOL_SCROLLS.with(|handles|handles.borrow().get(&output_key).unwrap().clone());
+            assert!(output.max_offset().y>px(100.),"Output must overflow its own panel");
+            assert!(view.read(cx).scroll.max_offset().y>px(100.),"Fixture must also overflow the page");
+            let page_offset=view.read(cx).scroll.offset();
+            let position=output.bounds().origin+point(px(60.),px(50.));
+            for delta in [-100.,-100000.,-100.,100000.,100.] {
+                window.dispatch_event(PlatformInput::ScrollWheel(ScrollWheelEvent {position,delta:ScrollDelta::Pixels(point(px(0.),px(delta))),..Default::default()}),cx);
+                let _=window.draw(cx);
+                assert_eq!(view.read(cx).scroll.offset(),page_offset,"Panel wheel must not move the page, including at either edge");
+                if delta == -100. { assert!(output.offset().y<px(0.),"Wheel must move the output itself"); }
+            }
+            output.set_offset(point(px(0.),px(0.)));let _=window.draw(cx);
+            let thumb_position=point(output.bounds().right()-px(7.),output.bounds().top()+px(18.));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,position:thumb_position,..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent {position:thumb_position+point(px(0.),px(100.)),pressed_button:Some(MouseButton::Left),..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position:thumb_position+point(px(0.),px(100.)),..Default::default()}),cx);
+            let _=window.draw(cx);
+            assert!(output.offset().y<px(0.),"Dragging the scrollbar must move its output");
+            assert_eq!(view.read(cx).scroll.offset(),page_offset,"Dragging the output scrollbar must not move the page");
+            output.set_offset(point(px(0.),px(-140.)));let _=window.draw(cx);
+            window.render_to_image().unwrap().save(directory.join("tool-output-scrolled.png")).unwrap();
+        });
+        eprintln!("tool output wheel containment regression: {result:?}");
         cx.update(|cx|cx.quit());
     }).detach();
 }

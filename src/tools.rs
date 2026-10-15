@@ -218,7 +218,7 @@ impl ToolRegistry {
             return Ok(this);
         }
         if settings.bash_enabled {
-            this.add("bash".into(), format!("执行一条 Bash 命令；默认工作目录为系统桌面，可在命令中用 cd 切换目录。每次调用独立启动。{}", if settings.bash_trusted { "用户已启用信任调用。" } else { "每次都需用户确认。" }), json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?;
+            this.add("bash".into(), bash_description(settings)?, json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?;
         }
         for f in settings.functions.iter().filter(|f| f.enabled) {
             this.add(
@@ -288,13 +288,7 @@ impl ToolRegistry {
             Target::Bash => {
                 let command = args["command"].as_str().context("缺少 command")?;
                 let desktop = desktop_directory()?;
-                run_process_in(
-                    &settings.bash_path,
-                    &["-c".into(), command.into()],
-                    None,
-                    cancel,
-                    Some(&desktop),
-                )
+                run_bash(&settings.bash_path, command, cancel, &desktop)
             }
             Target::Function(f) => run_process(&f.command, &f.args, Some(&call.arguments), cancel),
             Target::Mcp(i, name) => Ok(self.clients[*i]
@@ -419,6 +413,44 @@ fn desktop_directory() -> Result<std::path::PathBuf> {
     Ok(desktop)
 }
 
+fn bash_description(settings: &Settings) -> Result<String> {
+    let desktop = desktop_directory()?.to_string_lossy().replace('\\', "/");
+    Ok(format!(
+        "Execute Bash on the user's local machine. OS: {} ({}). Shell executable: {}. Initial working directory on EVERY call: {} (the actual system Desktop). Each call starts a fresh shell; cd does not persist between calls. This is a local desktop application, NOT a hosted Linux sandbox. Do not assume /mnt/data, /home/oai/share, or /tmp are available. On Windows use quoted forward-slash drive paths such as '{}' or relative paths from Desktop, e.g. cat > './cute_snake_game.html' <<'EOF'. Check pwd and available tools when needed; never invent directories. Scripts are delivered as UTF-8; write text files as UTF-8, and use a quoted heredoc delimiter for literal content. {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        settings.bash_path,
+        desktop,
+        desktop,
+        if settings.bash_trusted {
+            "The user enabled trusted execution."
+        } else {
+            "Each execution requires user confirmation."
+        }
+    ))
+}
+
+fn run_bash(
+    program: &str,
+    script: &str,
+    cancel: &AtomicBool,
+    directory: &std::path::Path,
+) -> Result<String> {
+    // Windows ports may decode argv using the ANSI codepage. Feed script bytes
+    // directly instead, so heredocs and redirections preserve Chinese and emoji.
+    let script = format!(
+        "export LANG=C.UTF-8 LC_ALL=C.UTF-8\n{}\n",
+        script.replace("\r\n", "\n")
+    );
+    run_process_in(
+        program,
+        &["-s".into(), "--".into()],
+        Some(&script),
+        cancel,
+        Some(directory),
+    )
+}
+
 fn run_process_in(
     program: &str,
     args: &[String],
@@ -436,11 +468,16 @@ fn run_process_in(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    if let Some(mut stdin) = child.stdin.take()
-        && let Some(input) = input
-    {
-        stdin.write_all(input.as_bytes())?;
-    }
+    // Read output concurrently with input: a long heredoc can otherwise fill
+    // stdin while an earlier command blocks on a full stdout pipe.
+    let input = input.map(str::as_bytes).map(<[u8]>::to_vec);
+    let stdin = child.stdin.take();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        if let (Some(mut stdin), Some(input)) = (stdin, input) {
+            stdin.write_all(&input)?;
+        }
+        Ok(())
+    });
     let stdout = child.stdout.take().context("stdout unavailable")?;
     let stderr = child.stderr.take().context("stderr unavailable")?;
     let read = |stream: Box<dyn Read + Send>| {
@@ -490,13 +527,27 @@ fn run_process_in(
     };
     // Readers may remain open if the invoked program launches background children.
     for _ in 0..25 {
-        if out.is_finished() && err.is_finished() {
+        if out.is_finished() && err.is_finished() && writer.is_finished() {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     if !out.is_finished() || !err.is_finished() {
         bail!("子进程持有输出管道，无法取得完整结果");
+    }
+    if writer.is_finished() {
+        let written = writer
+            .join()
+            .map_err(|_| anyhow::anyhow!("脚本输入线程异常"))?;
+        // An explicit exit may close stdin before the remaining script is read.
+        // Preserve that command's real exit status and captured diagnostics.
+        if let Err(error) = written
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(error).context("无法传入脚本");
+        }
+    } else {
+        bail!("子进程持有输入管道，无法完成脚本传入");
     }
     Ok(format!(
         "exit: {}\n{}\n{}",
@@ -509,6 +560,64 @@ fn run_process_in(
 #[cfg(test)]
 mod output_tests {
     use super::*;
+
+    #[test]
+    fn bash_utf8_heredoc_writes_exact_file_bytes() {
+        let root = std::env::temp_dir().join(format!("mori-utf8-{}", crate::model::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(windows)]
+        let shells = [
+            "C:/Program Files/Git/bin/bash.exe",
+            "C:/DevKit/w64devkit/bin/bash.exe",
+        ];
+        #[cfg(not(windows))]
+        let shells = ["bash"];
+        let body = format!(
+            "<!doctype html>\n<title>可爱贪吃蛇 🐍</title>\n{}",
+            "你好，世界！🌿\n".repeat(12000)
+        );
+        for shell in shells {
+            #[cfg(windows)]
+            if !std::path::Path::new(shell).is_file() {
+                continue;
+            }
+            let script = format!(
+                "printf '可爱贪吃蛇 🐍\\n'\nprintf '%160000s\\n' ''\ncat > './game.html' <<'MORI_EOF'\n{body}MORI_EOF\ncat './game.html' | head -n 2"
+            );
+            let output = run_bash(shell, &script, &AtomicBool::new(false), &root).unwrap();
+            assert!(output.contains("可爱贪吃蛇 🐍"), "{shell}: {output}");
+            assert_eq!(
+                std::fs::read(root.join("game.html")).unwrap(),
+                body.as_bytes(),
+                "{shell}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bash_schema_describes_the_real_host_and_desktop() {
+        let settings = Settings {
+            tools_enabled: true,
+            bash_enabled: true,
+            ..Settings::default()
+        };
+        let registry = ToolRegistry::load(&settings).unwrap();
+        let description = registry.schemas[0]["function"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains(std::env::consts::OS));
+        assert!(
+            description.contains(
+                &desktop_directory()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            )
+        );
+        assert!(description.contains("NOT a hosted Linux sandbox"));
+        assert!(description.contains("relative paths from Desktop"));
+    }
 
     #[test]
     fn bash_preserves_explicit_directory_with_spaces_and_unicode() {

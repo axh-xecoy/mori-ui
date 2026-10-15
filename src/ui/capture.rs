@@ -260,6 +260,7 @@ print(greet("Mori"))
                 this.generation=None;this.status.clear();this.page=Page::Chat;this.toast=None;
                 this.new_chat(window,cx);this.toast=None;
                 let mut reply=Message::new("assistant","Bash 独立滚动检查");
+                reply.context_note="上下文已调整：较早的 2 轮对话未参与本次回答。保留最近对话，完整记录仍在本地。".into();
                 reply.tools.push(ToolCall {id:"scroll-regression".into(),name:"bash".into(),arguments:r#"{"command":"cat game.html"}"#.into(),result:Some("中文输出很长，需要独立滚动。\n".repeat(1000))});
                 let key=format!("tool-{}-scroll-regression",reply.id);this.expanded.insert(key.clone());
                 let c=this.current_mut().unwrap();c.messages=vec![reply,Message::new("assistant","页面下方内容。\n\n".repeat(80))];

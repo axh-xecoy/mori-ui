@@ -68,10 +68,105 @@ fn checked(response: reqwest::blocking::Response) -> Result<reqwest::blocking::R
     }
     let status = response.status();
     let body = response.text().unwrap_or_default();
+    if matches!(status.as_u16(), 400 | 413 | 422)
+        && let Some(overflow) = ContextOverflow::parse(&body)
+    {
+        return Err(overflow.into());
+    }
     bail!(
         "服务商返回 {status}：{}",
         body.chars().take(1500).collect::<String>()
     )
+}
+
+#[derive(Debug)]
+struct ContextOverflow {
+    input: Option<u64>,
+    capacity: Option<u64>,
+}
+
+impl ContextOverflow {
+    fn parse(text: &str) -> Option<Self> {
+        let value: Value = serde_json::from_str(text).ok()?;
+        let error = value.get("error").unwrap_or(&value);
+        let is_context = ["code", "type"].iter().any(|key| {
+            matches!(
+                error[*key].as_str(),
+                Some("exceed_context_size_error" | "context_length_exceeded" | "prompt_too_long")
+            )
+        });
+        is_context.then(|| Self {
+            input: error["n_prompt_tokens"].as_u64(),
+            capacity: error["n_ctx"].as_u64().filter(|n| *n > 0),
+        })
+    }
+}
+
+impl std::fmt::Display for ContextOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "上下文超过服务端容量")?;
+        if let (Some(input), Some(capacity)) = (self.input, self.capacity) {
+            write!(
+                f,
+                "（本次输入 {input} tokens，服务端上限 {capacity} tokens）"
+            )?;
+        }
+        write!(
+            f,
+            "。为保留最近一轮内容，已停止自动缩减。请增大服务端上下文，或减少本轮附件 / 内容后重试；最大输出 token 设置不会增大上下文窗口。"
+        )
+    }
+}
+impl std::error::Error for ContextOverflow {}
+
+// Work only on the request copy. Keep complete turns (including tool results),
+// the previous user exchange, and the latest user turn / ongoing tool chain.
+fn reduce_context(history: &mut Vec<Message>, overflow: &ContextOverflow, attempt: usize) -> usize {
+    let starts: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| (m.role == "user").then_some(i))
+        .collect();
+    if starts.len() < 3 {
+        return 0;
+    }
+    let protected = starts[starts.len() - 2];
+    let weight = |m: &Message| -> usize {
+        m.content.len()
+            + m.reasoning.len()
+            + m.thinking_blocks
+                .iter()
+                .map(|v| v.to_string().len())
+                .sum::<usize>()
+            + m.attachments
+                .iter()
+                .map(|a| a.text.as_ref().map_or(4096, String::len))
+                .sum::<usize>()
+            + m.tools
+                .iter()
+                .map(|t| t.arguments.len() + t.result.as_ref().map_or(0, String::len))
+                .sum::<usize>()
+            + 64
+    };
+    let ratio = match (overflow.input, overflow.capacity) {
+        (Some(input), Some(capacity)) if input > 0 => {
+            let reserve = (capacity / 8).clamp(256, 8192).min(capacity / 2);
+            1. - (capacity.saturating_sub(reserve) as f64 / input as f64)
+        }
+        _ => 0.25,
+    }
+    .clamp(0.1, 1.);
+    let target = (history.iter().map(weight).sum::<usize>() as f64 * ratio) as usize;
+    let mut end = protected;
+    for &start in starts.iter().skip(1).filter(|i| **i <= protected) {
+        if attempt < 2 && history[..start].iter().map(weight).sum::<usize>() >= target {
+            end = start;
+            break;
+        }
+    }
+    let turns = starts.iter().filter(|i| **i < end).count();
+    history.drain(..end);
+    turns
 }
 pub fn models(provider: &Provider) -> Result<Vec<String>> {
     let endpoint = if provider.protocol == Protocol::Ollama {
@@ -787,21 +882,68 @@ pub fn run(mut request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool
                 t.result.is_some() && serde_json::from_str::<Value>(&t.arguments).is_ok()
             });
         }
+        let mut excluded_turns = 0;
+        let mut recovery_attempts = 0;
+        let mut context_note = String::new();
         for _ in 0..12 {
             if cancel.load(Ordering::Relaxed) {
                 return Ok(());
             }
             let mut message = Message::new("assistant", "");
+            message.context_note.clone_from(&context_note);
             message.model_id = request.conversation.model.clone();
             message.provider_id = request.provider.id.clone();
-            stream(
-                &request,
-                &history,
-                &registry.schemas,
-                &mut message,
-                &tx,
-                &cancel,
-            )?;
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                match stream(
+                    &request,
+                    &history,
+                    &registry.schemas,
+                    &mut message,
+                    &tx,
+                    &cancel,
+                ) {
+                    Ok(()) => break,
+                    Err(error) => {
+                        let Some(overflow) = error.downcast_ref::<ContextOverflow>() else {
+                            return Err(error);
+                        };
+                        if recovery_attempts >= 3 {
+                            return Err(error);
+                        }
+                        let removed = reduce_context(&mut history, overflow, recovery_attempts);
+                        if removed == 0 {
+                            return Err(error);
+                        }
+                        if excluded_turns == 0 {
+                            request.prompt.push_str("\n\n[Mori context notice]\nSome older complete turns have been omitted to fit the context window. The recent exchange and latest request are preserved. Do not pretend to remember omitted details; ask for them if essential.");
+                        }
+                        excluded_turns += removed;
+                        recovery_attempts += 1;
+                        message.context_note = if request.settings.language == "en" {
+                            format!(
+                                "Context adjusted: {excluded_turns} older turns were excluded from this request. Recent turns are preserved; full history remains saved locally."
+                            )
+                        } else {
+                            format!(
+                                "上下文已调整：较早的 {excluded_turns} 轮对话未参与本次回答。保留最近对话，完整记录仍在本地。"
+                            )
+                        };
+                        context_note.clone_from(&message.context_note);
+                        let _ = tx.send(Event::Message(message.clone()));
+                        let _ = tx.send(Event::Status(
+                            if request.settings.language == "en" {
+                                "Adjusting context and retrying…"
+                            } else {
+                                "正在调整上下文并重试…"
+                            }
+                            .into(),
+                        ));
+                    }
+                }
+            }
             if cancel.load(Ordering::Relaxed) {
                 return Ok(());
             }
@@ -1122,6 +1264,133 @@ mod tests {
             },
         }
     }
+    fn context_failure() -> Response {
+        let mut response = Response::json(
+            json!({"error":{"code":400,"type":"exceed_context_size_error","n_prompt_tokens":32779,"n_ctx":32768}}),
+        );
+        response.status = 400;
+        response
+    }
+
+    #[test]
+    fn context_overflow_retries_without_changing_saved_history_or_splitting_tools() {
+        let (url, requests, handle) = server(vec![
+            context_failure(),
+            Response::sse(&[
+                json!({"choices":[{"delta":{"content":"continued code"},"finish_reason":"stop"}]}),
+            ]),
+        ]);
+        let mut req = request(Protocol::OpenAi, url);
+        let mut old = Message::new("assistant", "old answer".repeat(2000));
+        old.tools.push(ToolCall {
+            id: "old-call".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            result: Some("old output".into()),
+        });
+        let mut recent = Message::new("assistant", "<svg>recent code must stay intact</svg>");
+        recent.tools.push(ToolCall {
+            id: "recent-call".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            result: Some("recent output".into()),
+        });
+        req.conversation.messages.extend([
+            old,
+            Message::new("user", "fix this SVG"),
+            recent,
+            Message::new("user", "继续"),
+        ]);
+        let saved = serde_json::to_value(&req.conversation).unwrap();
+        let (tx, rx) = mpsc::channel();
+        run(req.clone(), tx, Arc::new(AtomicBool::new(false)));
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(!events.iter().any(|e| matches!(e, Event::Error(_))));
+        assert!(events.iter().any(|e|matches!(e,Event::Message(m) if m.content=="continued code" && !m.context_note.is_empty())));
+        let (_, first) = requests.recv().unwrap();
+        let (_, retry) = requests.recv().unwrap();
+        assert!(first.to_string().contains("old-call"));
+        assert!(!retry.to_string().contains("old-call"));
+        let messages = retry["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Be helpful")
+        );
+        assert_eq!(messages[1]["content"], "fix this SVG");
+        assert_eq!(
+            messages[2]["content"],
+            "<svg>recent code must stay intact</svg>"
+        );
+        assert_eq!(messages[2]["tool_calls"][0]["id"], "recent-call");
+        assert_eq!(messages[3]["tool_call_id"], "recent-call");
+        assert_eq!(messages[4]["content"], "继续");
+        assert_eq!(serde_json::to_value(&req.conversation).unwrap(), saved);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn oversized_recent_exchange_stops_without_cutting_code_or_latest_input() {
+        let (url, requests, handle) = server(vec![context_failure()]);
+        let mut req = request(Protocol::OpenAi, url);
+        req.conversation.messages.extend([
+            Message::new("assistant", "code".repeat(20000)),
+            Message::new("user", "继续"),
+        ]);
+        let (tx, rx) = mpsc::channel();
+        run(req, tx, Arc::new(AtomicBool::new(false)));
+        assert!(rx.try_iter().any(|e|matches!(e,Event::Error(s) if s.contains("32779") && s.contains("32768") && s.contains("增大服务端上下文"))));
+        assert_eq!(requests.try_iter().count(), 1);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn ordinary_bad_requests_do_not_reduce_history_or_retry() {
+        let mut response = Response::json(
+            json!({"error":{"type":"invalid_request_error","message":"temperature invalid"}}),
+        );
+        response.status = 400;
+        let (url, requests, handle) = server(vec![response]);
+        let mut req = request(Protocol::OpenAi, url);
+        req.conversation.messages.extend([
+            Message::new("assistant", "old"),
+            Message::new("user", "second"),
+            Message::new("assistant", "recent"),
+            Message::new("user", "third"),
+        ]);
+        let (tx, rx) = mpsc::channel();
+        run(req, tx, Arc::new(AtomicBool::new(false)));
+        assert!(
+            rx.try_iter()
+                .any(|e| matches!(e,Event::Error(s) if s.contains("temperature invalid")))
+        );
+        assert_eq!(requests.try_iter().count(), 1);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn context_recovery_is_bounded_and_never_discards_the_recent_exchange() {
+        let (url, requests, handle) = server((0..4).map(|_| context_failure()).collect());
+        let mut req = request(Protocol::OpenAi, url);
+        for i in 0..20 {
+            req.conversation.messages.extend([
+                Message::new("assistant", format!("answer {i}")),
+                Message::new("user", format!("request {i}")),
+            ]);
+        }
+        let (tx, rx) = mpsc::channel();
+        run(req, tx, Arc::new(AtomicBool::new(false)));
+        assert!(rx.try_iter().any(|e| matches!(e, Event::Error(_))));
+        let requests: Vec<_> = requests.try_iter().collect();
+        assert_eq!(requests.len(), 4);
+        let last = &requests.last().unwrap().1["messages"];
+        assert_eq!(last[1]["content"], "request 18");
+        assert_eq!(last[2]["content"], "answer 19");
+        assert_eq!(last[3]["content"], "request 19");
+        handle.join().unwrap();
+    }
     #[test]
     fn full_http_streams_for_all_three_protocols() {
         for protocol in [Protocol::OpenAi, Protocol::Ollama, Protocol::Anthropic] {
@@ -1131,6 +1400,7 @@ mod tests {
                     json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":4}}),
                 ]),
                 Protocol::Ollama => Response {
+                    status: 200,
                     content_type: "application/x-ndjson",
                     body: format!(
                         "{}\n{}\n",
@@ -1204,6 +1474,7 @@ mod tests {
             let (url, requests, handle) = server(vec![
                 Response::json(json!({"models":[{"name":"local-model"}]})),
                 Response {
+                    status: 200,
                     content_type: "application/x-ndjson",
                     body: format!(
                         "{}\n",
@@ -1390,6 +1661,7 @@ mod tests {
     #[test]
     fn truncated_stream_returns_error_instead_of_silent_success() {
         let (url, _requests, handle) = server(vec![Response {
+            status: 200,
             content_type: "text/event-stream",
             body: format!(
                 "data: {}\n\n",

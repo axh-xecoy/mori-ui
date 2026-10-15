@@ -691,6 +691,14 @@ impl Mori {
                                         }),
                                 )
                             })
+                            .when(!m.context_note.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(p.muted))
+                                        .child(m.context_note.clone()),
+                                )
+                            })
                             .when(!m.content.is_empty(), |d| {
                                 let content = if user {
                                     TextView::html(

@@ -7,6 +7,7 @@ use std::{
 };
 
 pub struct Response {
+    pub status: u16,
     pub content_type: &'static str,
     pub body: String,
     pub extra_headers: String,
@@ -14,6 +15,7 @@ pub struct Response {
 impl Response {
     pub fn json(value: Value) -> Self {
         Self {
+            status: 200,
             content_type: "application/json",
             body: value.to_string(),
             extra_headers: String::new(),
@@ -21,6 +23,7 @@ impl Response {
     }
     pub fn sse(events: &[Value]) -> Self {
         Self {
+            status: 200,
             content_type: "text/event-stream",
             body: events
                 .iter()
@@ -66,7 +69,7 @@ pub fn server(
             socket.read_exact(&mut body).unwrap();
             let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             tx.send((header, value)).unwrap();
-            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n",response.content_type,response.body.len(),response.extra_headers).unwrap();
+            write!(socket,"HTTP/1.1 {} Response\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n",response.status,response.content_type,response.body.len(),response.extra_headers).unwrap();
             // Deliberately break UTF-8 characters and SSE delimiters across network reads.
             for chunk in response.body.as_bytes().chunks(7) {
                 socket.write_all(chunk).unwrap();

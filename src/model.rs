@@ -150,6 +150,8 @@ pub struct Message {
     #[serde(default)]
     pub reasoning: String,
     #[serde(default)]
+    pub context_note: String,
+    #[serde(default)]
     pub thinking_blocks: Vec<Value>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
@@ -171,6 +173,7 @@ impl Message {
             provider_id: String::new(),
             content: content.into(),
             reasoning: String::new(),
+            context_note: String::new(),
             thinking_blocks: vec![],
             attachments: vec![],
             tools: vec![],

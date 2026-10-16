@@ -1,4 +1,12 @@
 use super::*;
+
+fn tool_display_name(name: &str) -> &str {
+    match name {
+        "bash" | "shell" => "Shell",
+        _ => name,
+    }
+}
+
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 
 #[derive(IntoElement)]
@@ -832,13 +840,7 @@ impl Mori {
                                                     .text_sm()
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .flex_shrink_0()
-                                                    .child(
-                                                        if t.name == "bash" || t.name == "shell" {
-                                                            "Bash".to_string()
-                                                        } else {
-                                                            t.name.clone()
-                                                        },
-                                                    ),
+                                                    .child(tool_display_name(&t.name).to_string()),
                                             )
                                             .child(
                                                 div()
@@ -1054,12 +1056,9 @@ impl Mori {
                                 .items_center()
                                 .gap_2()
                                 .child(icon("shield-check"))
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_sm()
-                                        .child(format!("{} 请求执行", a.call.name)),
-                                ),
+                                .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().child(
+                                    format!("{} 请求执行", tool_display_name(&a.call.name)),
+                                )),
                         )
                         .child(label(
                             "检查参数后决定；工具可能读取文件、联网或修改本机内容。",

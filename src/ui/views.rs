@@ -818,7 +818,7 @@ impl Mori {
                                                 cx.notify();
                                             }))
                                             .child(
-                                                icon(if t.name == "bash" {
+                                                icon(if t.name == "bash" || t.name == "shell" {
                                                     "terminal"
                                                 } else {
                                                     "blocks"
@@ -832,11 +832,13 @@ impl Mori {
                                                     .text_sm()
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .flex_shrink_0()
-                                                    .child(if t.name == "bash" {
-                                                        "Bash".to_string()
-                                                    } else {
-                                                        t.name.clone()
-                                                    }),
+                                                    .child(
+                                                        if t.name == "bash" || t.name == "shell" {
+                                                            "Bash".to_string()
+                                                        } else {
+                                                            t.name.clone()
+                                                        },
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -1821,6 +1823,10 @@ impl Mori {
 }
 impl Render for Mori {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(path) = self.pending_shell_directory.take() {
+            self.bash_directory
+                .update(cx, |state, cx| state.set_value(path, window, cx));
+        }
         self.compact =
             window.viewport_size().height < px(760.) || window.viewport_size().width < px(1080.);
         let p = Palette::new(self.library.settings.dark);
@@ -1842,7 +1848,12 @@ impl Render for Mori {
             .text_base()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, w, cx| {
+                    if this.page != Page::Chat
+                        && !gpui_kit::component::GlobalState::is_text_selection_suppressed(cx)
+                    {
+                        w.blur(cx);
+                    }
                     if show_sidebar
                         && (f32::from(event.position.x) - this.library.settings.sidebar_width).abs()
                             <= 4.
@@ -1853,7 +1864,19 @@ impl Render for Mori {
                     }
                 }),
             )
+            .on_mouse_down_out(|event, w, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                // Native titlebar presses are also forwarded by the Windows backend.
+                // Do not let a non-client click begin a window text-selection drag.
+                gpui_kit::component::GlobalState::suppress_text_selection(cx);
+                gpui_kit::base::TextSelection::end(w, cx);
+            })
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, w, cx| {
+                if event.pressed_button != Some(MouseButton::Left) {
+                    gpui_kit::base::TextSelection::end(w, cx);
+                }
                 if this.resizing_sidebar {
                     let max = (f32::from(w.viewport_size().width) - 500.).clamp(220., 380.);
                     this.library.settings.sidebar_width =

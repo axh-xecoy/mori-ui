@@ -47,7 +47,7 @@ impl Mori {
                     )
                     .child(label(
                         if settings.bash_trusted {
-                            "信任模式：自动执行 Bash 调用"
+                            "信任模式：自动执行本机 Shell 调用"
                         } else {
                             "每次执行前确认"
                         },
@@ -57,9 +57,9 @@ impl Mori {
                         button(
                             "enable-bash",
                             if settings.bash_enabled {
-                                "Bash 已启用"
+                                "本机命令已启用"
                             } else {
-                                "启用 Bash"
+                                "启用本机命令"
                             },
                             "power",
                         )
@@ -287,7 +287,7 @@ impl Mori {
             .child(controls).child(servers).child(add).child(generation)
             .child(button("advanced-toggle", if self.show_advanced { "收起高级设置" } else { "高级设置与自定义函数" }, "sliders-horizontal")
                 .on_click(cx.listener(|this, _, w, cx| { this.show_advanced = !this.show_advanced; if this.show_advanced { this.load_advanced(w, cx); } cx.notify(); })))
-            .when(self.show_advanced, |d| d.child(card(p).child(label("可配置 Bash 路径、MCP 环境变量与自定义函数。", p.muted))
+            .when(self.show_advanced, |d| d.child(card(p).child(label("可配置 Shell 类型与路径、MCP 环境变量及自定义函数。", p.muted))
                 .child(Textarea::new(&self.advanced).font_family("Cascadia Code").text_sm())
                 .child(Button::new("save-advanced").primary().label(tr("验证并保存")).on_click(cx.listener(|this, _, w, cx| {
                     match this.library.settings.patched(&this.advanced.read(cx).value()) {

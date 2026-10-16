@@ -998,7 +998,7 @@ pub fn run(mut request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool
         let mut registry = ToolRegistry::load(&request.settings)?;
         if request.settings.tools_enabled {
             request.prompt.push_str(&format!(
-                "\n\n[Mori runtime environment]\nEnabled tools execute locally on the user's {} machine, not in a hosted Linux sandbox. Follow the bash tool's configured working directory and platform-specific path instructions when creating files.",
+                "\n\n[Mori runtime environment]\nEnabled tools execute locally on the user's {} machine, not in a hosted Linux sandbox. Follow the local command tool's actual Shell type, configured working directory and platform-specific syntax instructions when creating files.",
                 std::env::consts::OS
             ));
         }
@@ -1081,23 +1081,24 @@ pub fn run(mut request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool
                 return Ok(());
             }
             for i in 0..message.tools.len() {
-                let approved =
-                    if request.settings.bash_trusted && registry.is_bash(&message.tools[i].name) {
-                        true
-                    } else {
-                        let (approval_tx, approval_rx) = mpsc::channel();
-                        tx.send(Event::Approval(message.tools[i].clone(), approval_tx))?;
-                        loop {
-                            if cancel.load(Ordering::Relaxed) {
-                                return Ok(());
-                            }
-                            match approval_rx.recv_timeout(Duration::from_millis(100)) {
-                                Ok(v) => break v,
-                                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                                Err(_) => {}
-                            }
+                let approved = if request.settings.bash_trusted
+                    && registry.is_local_shell(&message.tools[i].name)
+                {
+                    true
+                } else {
+                    let (approval_tx, approval_rx) = mpsc::channel();
+                    tx.send(Event::Approval(message.tools[i].clone(), approval_tx))?;
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Ok(());
                         }
-                    };
+                        match approval_rx.recv_timeout(Duration::from_millis(100)) {
+                            Ok(v) => break v,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                            Err(_) => {}
+                        }
+                    }
+                };
                 let output = if approved {
                     registry
                         .execute(&message.tools[i], &request.settings, &cancel)

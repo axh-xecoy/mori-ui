@@ -329,19 +329,42 @@ impl Mori {
                 p,
             ))
             .child(div().h(px(1.)).bg(rgb(p.line)))
-            .child(div().font_weight(FontWeight::MEDIUM).child("Bash 本机命令"))
+            .child(div().font_weight(FontWeight::MEDIUM).child(tr("本机命令 Shell")))
             .child(label("默认工作目录为 ~（用户主目录），支持绝对路径或 ~/子目录。每次调用均从此目录开始。", p.muted))
-            .child(label("Bash 可执行文件", p.muted))
+            .child(label("Shell 可执行文件（自动模式留空则检测本机可用程序）", p.muted))
+            .child(div().flex().flex_wrap().gap_2().children(
+                [("auto", "自动检测"), ("powershell", "PowerShell"), ("cmd", "cmd"), ("bash", "Bash"), ("sh", "POSIX sh")].into_iter().map(|(kind, title)| {
+                    button(format!("shell-kind-{kind}"), title, "terminal")
+                        .when(self.shell_kind_input == kind, |b| b.bg(rgb(p.soft)).text_color(rgb(p.accent)))
+                        .on_click(cx.listener(move |this, _, w, cx| {
+                            this.shell_kind_input = kind.into();
+                            let program = match kind { "powershell" => if cfg!(windows) { "powershell.exe" } else { "pwsh" }, "cmd" => "cmd.exe", "bash" => "bash", "sh" => "/bin/sh", _ => "" };
+                            this.bash_program.update(cx, |state, cx| state.set_value(program, w, cx));
+                            cx.notify();
+                        }))
+                })
+            ))
             .child(Input::new(&self.bash_program).w_full())
             .child(label("默认工作目录", p.muted))
-            .child(Input::new(&self.bash_directory).w_full())
-            .child(label("未安装 Bash 时会跳过本机命令工具，聊天和其他工具仍可使用。Windows 可安装 Git Bash 后指定其完整路径。", p.muted))
-            .child(button("save-bash-settings", "保存并检测 Bash", "check").on_click(cx.listener(|this, _, w, cx| {
+            .child(div().flex().items_center().gap_2()
+                .child(Input::new(&self.bash_directory).flex_1())
+                .child(button("choose-shell-directory", "选择文件夹", "folder-open").on_click(cx.listener(|this, _, _, _| {
+                    let tx = this.work_tx.clone();
+                    let current = crate::tools::bash_directory(&this.library.settings).ok();
+                    std::thread::spawn(move || {
+                        let mut dialog = rfd::FileDialog::new().set_title("选择本机命令的默认工作目录");
+                        if let Some(path) = current { dialog = dialog.set_directory(path); }
+                        let _ = tx.send(Work::ShellDirectory(dialog.pick_folder()));
+                    });
+                }))))
+            .child(label("自动模式：Windows 优先 PowerShell，其次 cmd；macOS/Linux 优先 Bash，其次 sh。模型会收到实际 Shell 类型和对应语法。指定路径时请匹配类型。", p.muted))
+            .child(button("save-bash-settings", "保存并检测 Shell", "check").on_click(cx.listener(|this, _, w, cx| {
                 let program = this.bash_program.read(cx).value().trim().to_string();
                 let directory = this.bash_directory.read(cx).value().trim().to_string();
-                if program.is_empty() {
-                    this.show_toast("请填写 Bash 可执行文件路径".into()); cx.notify(); return;
+                if program.is_empty() && this.shell_kind_input != "auto" {
+                    this.show_toast("请填写 Shell 可执行文件路径".into()); cx.notify(); return;
                 }
+                this.library.settings.shell_kind = this.shell_kind_input.clone();
                 this.library.settings.bash_path = program;
                 this.library.settings.bash_working_directory = if directory.is_empty() { "~".into() } else { directory };
                 this.load_advanced(w, cx);
@@ -349,11 +372,11 @@ impl Mori {
                 let settings = this.library.settings.clone();
                 let tx = this.work_tx.clone();
                 std::thread::spawn(move || {
-                    let result = crate::tools::validate_bash(&settings).map(|()| "Bash 配置已保存，检测通过".to_string());
+                    let result = crate::tools::resolve_shell(&settings).map(|shell| format!("配置已保存，可用 Shell：{}（{}）", shell.shell_kind, shell.bash_path));
                     let _ = tx.send(Work::Notice(result));
                 }); cx.notify();
             })))
-            .child(label("其他配置自动保存；Bash 路径修改需点击保存按钮。", p.muted))
+            .child(label("其他配置自动保存；Shell 类型与路径修改需点击保存按钮。", p.muted))
     }
     pub(super) fn add_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.library.providers.push(Provider::custom());

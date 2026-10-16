@@ -26,6 +26,20 @@ pub fn tr(text: &str) -> String {
         }
     }
     match text {
+        "可配置 Shell 类型与路径、MCP 环境变量及自定义函数。" => "Configure shell types and paths, MCP environment variables, and custom functions.",
+        "本机命令 Shell" => "Local command shell",
+        "Shell 可执行文件（自动模式留空则检测本机可用程序）" => "Shell executable (leave empty for automatic discovery)",
+        "默认工作目录" => "Default working directory",
+        "选择文件夹" => "Choose folder",
+        "自动检测" => "Automatic",
+        "保存并检测 Shell" => "Save & test shell",
+        "请填写 Shell 可执行文件路径" => "Enter the shell executable path",
+        "默认工作目录为 ~（用户主目录），支持绝对路径或 ~/子目录。每次调用均从此目录开始。" => "The default is ~ (your home directory). Use an absolute path or ~/subfolder. Every call starts here.",
+        "自动模式：Windows 优先 PowerShell，其次 cmd；macOS/Linux 优先 Bash，其次 sh。模型会收到实际 Shell 类型和对应语法。指定路径时请匹配类型。" => "Automatic: PowerShell then cmd on Windows; Bash then sh on macOS/Linux. The model receives the actual shell type and syntax. Custom paths must match the selected type.",
+        "其他配置自动保存；Shell 类型与路径修改需点击保存按钮。" => "Other preferences save automatically. Save shell type and path changes with the button above.",
+        "信任模式：自动执行本机 Shell 调用" => "Trusted: run local shell calls automatically",
+        "本机命令已启用" => "Local commands enabled",
+        "启用本机命令" => "Enable local commands",
         "删除连接" => "Delete connection",
         "移除连接和密钥，保留已有聊天" => "Remove connection and API key; keep existing chats",
         "连接已删除，已有聊天记录保留" => "Connection deleted. Existing chats are kept.",

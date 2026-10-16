@@ -99,6 +99,7 @@ enum SettingsTab {
 }
 enum Work {
     Models(String, anyhow::Result<Vec<String>>),
+    ShellDirectory(Option<std::path::PathBuf>),
     Transcription(anyhow::Result<String>),
     Speech(anyhow::Result<std::path::PathBuf>),
     Image(String, anyhow::Result<Attachment>),
@@ -175,6 +176,8 @@ pub struct Mori {
     advanced: Entity<TextareaState>,
     bash_program: Entity<InputState>,
     bash_directory: Entity<InputState>,
+    pending_shell_directory: Option<String>,
+    shell_kind_input: String,
     title_input: Entity<InputState>,
     selected_provider: usize,
     selected_assistant: usize,
@@ -365,6 +368,7 @@ impl Mori {
                 .submit_on_enter(library.settings.send_on_enter)
                 .auto_grow(3, 9)
         });
+        let shell_kind_input = library.settings.shell_kind.clone();
         let bash_program = cx.new(|cx| {
             InputState::new(window, cx).default_value(library.settings.bash_path.clone())
         });
@@ -496,6 +500,8 @@ impl Mori {
             compact: false,
             bash_program,
             bash_directory,
+            pending_shell_directory: None,
+            shell_kind_input,
             show_advanced: false,
             temperature,
             max_tokens,
@@ -1134,6 +1140,11 @@ impl Mori {
         for work in works {
             changed = true;
             match work {
+                Work::ShellDirectory(path) => {
+                    self.pending_shell_directory =
+                        path.map(|path| path.to_string_lossy().into_owned());
+                }
+
                 Work::Models(id, _) if !self.library.providers.iter().any(|p| p.id == id) => {}
                 Work::Models(id, result) => match result {
                     Ok(models) => {

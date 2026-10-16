@@ -205,6 +205,7 @@ pub enum Target {
 pub struct ToolRegistry {
     pub schemas: Vec<Value>,
     pub notices: Vec<String>,
+    shell: Option<Settings>,
     pub targets: std::collections::HashMap<String, Target>,
     pub clients: Vec<McpClient>,
 }
@@ -213,6 +214,7 @@ impl ToolRegistry {
         let mut this = Self {
             schemas: vec![],
             notices: vec![],
+            shell: None,
             targets: Default::default(),
             clients: vec![],
         };
@@ -220,9 +222,13 @@ impl ToolRegistry {
             return Ok(this);
         }
         if settings.bash_enabled {
-            match validate_bash(settings) {
-                Ok(()) => this.add("bash".into(), bash_description(settings)?, json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?,
-                Err(error) => this.notices.push(format!("Bash 不可用，已跳过本机命令工具：{error:#}。聊天与其他工具仍可使用，请在设置中配置 Bash。")),
+            match resolve_shell(settings) {
+                Ok(shell) => {
+                    let name = if shell.shell_kind == "bash" { "bash" } else { "shell" };
+                    this.add(name.into(), bash_description(&shell)?, json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?;
+                    this.shell = Some(shell);
+                }
+                Err(error) => this.notices.push(format!("本机 Shell 不可用，已跳过命令工具：{error:#}。聊天与其他工具仍可使用，请在设置中配置 Shell。")),
             }
         }
         for f in settings.functions.iter().filter(|f| f.enabled) {
@@ -279,21 +285,21 @@ impl ToolRegistry {
         self.targets.insert(name, target);
         Ok(())
     }
-    pub fn is_bash(&self, name: &str) -> bool {
+    pub fn is_local_shell(&self, name: &str) -> bool {
         matches!(self.targets.get(name), Some(Target::Bash))
     }
     pub fn execute(
         &mut self,
         call: &ToolCall,
-        settings: &Settings,
+        _settings: &Settings,
         cancel: &AtomicBool,
     ) -> Result<String> {
         let args: Value = serde_json::from_str(&call.arguments).context("工具参数不是合法 JSON")?;
         match self.targets.get(&call.name).context("工具不存在或未启用")? {
             Target::Bash => {
                 let command = args["command"].as_str().context("缺少 command")?;
-                let desktop = bash_directory(settings)?;
-                run_bash(&settings.bash_path, command, cancel, &desktop)
+                let shell = self.shell.as_ref().context("Shell 尚未初始化")?;
+                run_shell(shell, command, cancel)
             }
             Target::Function(f) => run_process(&f.command, &f.args, Some(&call.arguments), cancel),
             Target::Mcp(i, name) => Ok(self.clients[*i]
@@ -427,10 +433,82 @@ pub fn bash_directory(settings: &Settings) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-// Executed on a worker thread; never probe a process during rendering.
-pub fn validate_bash(settings: &Settings) -> Result<()> {
+fn inferred_shell(program: &str) -> Option<&'static str> {
+    let normalized = program.replace('\\', "/");
+    let name = normalized.rsplit('/').next()?.to_ascii_lowercase();
+    match name.trim_end_matches(".exe") {
+        "bash" => Some("bash"),
+        "sh" | "dash" | "zsh" => Some("sh"),
+        "pwsh" | "powershell" => Some("powershell"),
+        "cmd" => Some("cmd"),
+        _ => None,
+    }
+}
+
+pub fn resolve_shell(settings: &Settings) -> Result<Settings> {
+    bash_directory(settings)?;
+    let automatic = settings.shell_kind == "auto";
+    let configured = settings.bash_path.trim();
+    // The legacy default 'bash' means automatic discovery after upgrading.
+    let candidates: Vec<(&str, &str)> =
+        if automatic && (configured.is_empty() || configured == "bash") {
+            if cfg!(windows) {
+                vec![
+                    ("powershell", "pwsh"),
+                    ("powershell", "powershell.exe"),
+                    ("cmd", "cmd.exe"),
+                    ("bash", "bash"),
+                ]
+            } else {
+                vec![("bash", "bash"), ("sh", "/bin/sh")]
+            }
+        } else {
+            let kind = if automatic {
+                inferred_shell(configured).context("无法识别程序类型，请手动选择 Shell 类型")?
+            } else {
+                settings.shell_kind.as_str()
+            };
+            anyhow::ensure!(
+                ["bash", "sh", "powershell", "cmd"].contains(&kind),
+                "不支持的 Shell 类型"
+            );
+            if let Some(inferred) = inferred_shell(configured) {
+                anyhow::ensure!(inferred == kind, "程序路径与选中的 Shell 类型不匹配");
+            }
+            vec![(kind, configured)]
+        };
+    let mut errors = Vec::new();
+    for (kind, program) in candidates {
+        let mut shell = settings.clone();
+        shell.shell_kind = kind.into();
+        shell.bash_path = program.into();
+        match probe_shell(&shell) {
+            Ok(()) => return Ok(shell),
+            Err(error) => errors.push(format!("{program}: {error:#}")),
+        }
+    }
+    bail!("{}", errors.join("；"))
+}
+
+fn probe_shell(settings: &Settings) -> Result<()> {
+    let args: Vec<String> = match settings.shell_kind.as_str() {
+        "bash" => vec!["--noprofile", "--norc", "-c", "test -n \"$BASH_VERSION\""],
+        "sh" => vec!["-c", "__mori_shell=1; test \"$__mori_shell\" = 1"],
+        "powershell" => vec![
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "if ($PSVersionTable) { exit 0 } else { exit 1 }",
+        ],
+        "cmd" => vec!["/D", "/C", "exit 0"],
+        _ => bail!("不支持的 Shell 类型"),
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect();
     let mut child = hidden_command(&settings.bash_path)
-        .args(["--noprofile", "--norc", "-c", "test -n \"$BASH_VERSION\""])
+        .args(args)
         .current_dir(bash_directory(settings)?)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -440,18 +518,81 @@ pub fn validate_bash(settings: &Settings) -> Result<()> {
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
-            anyhow::ensure!(
-                status.success(),
-                "Bash 启动失败（{status}），请检查程序路径；Windows WSL 占位程序可能尚未配置发行版"
-            );
+            anyhow::ensure!(status.success(), "Shell 类型验证失败（{status}）");
             return Ok(());
         }
         if start.elapsed() > Duration::from_secs(3) {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("Bash 启动检测超时");
+            bail!("Shell 启动检测超时");
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn run_shell(settings: &Settings, script: &str, cancel: &AtomicBool) -> Result<String> {
+    let directory = bash_directory(settings)?;
+    match settings.shell_kind.as_str() {
+        "bash" => run_bash(&settings.bash_path, script, cancel, &directory),
+        "sh" => run_process_in(
+            &settings.bash_path,
+            &["-s".into()],
+            Some(script),
+            cancel,
+            Some(&directory),
+        ),
+        "powershell" => {
+            use base64::Engine as _;
+            let script = format!(
+                "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; $PSDefaultParameterValues['Out-File:Encoding']='utf8'; $PSDefaultParameterValues['Set-Content:Encoding']='utf8'; $PSDefaultParameterValues['Add-Content:Encoding']='utf8';\n{script}\n"
+            );
+            // Keep the encoded bootstrap short: model-written scripts can exceed
+            // Windows' command-line limit. Deliver the actual UTF-8 script on stdin.
+            let bootstrap = "& ([scriptblock]::Create([System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false)).ReadToEnd()))";
+            let bytes: Vec<u8> = bootstrap
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            run_process_in(
+                &settings.bash_path,
+                &[
+                    "-NoLogo".into(),
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-EncodedCommand".into(),
+                    encoded,
+                ],
+                Some(&script),
+                cancel,
+                Some(&directory),
+            )
+        }
+        "cmd" => {
+            let file = std::env::temp_dir().join(format!("mori-shell-{}.cmd", crate::model::id()));
+            std::fs::write(
+                &file,
+                format!(
+                    "@echo off\r\nchcp 65001 >nul\r\n{}\r\n",
+                    script.replace("\r\n", "\n").replace('\n', "\r\n")
+                ),
+            )?;
+            let result = run_process_in(
+                &settings.bash_path,
+                &[
+                    "/D".into(),
+                    "/Q".into(),
+                    "/C".into(),
+                    format!("call \"{}\"", file.display()),
+                ],
+                None,
+                cancel,
+                Some(&directory),
+            );
+            let _ = std::fs::remove_file(file);
+            result
+        }
+        _ => bail!("不支持的 Shell 类型"),
     }
 }
 
@@ -460,14 +601,28 @@ fn bash_description(settings: &Settings) -> Result<String> {
         .to_string_lossy()
         .replace('\\', "/");
     let platform = if cfg!(windows) {
-        "Windows host: the shell is Bash, not PowerShell or cmd. Use quoted forward-slash drive paths or relative paths. Git Bash/MSYS and WSL have different path mappings: inspect pwd first. Do not assume Linux system directories or apt exist."
+        "Windows host: use Windows file paths appropriate to the selected Shell, or relative paths. Only when using Bash, inspect Git Bash/MSYS/WSL path mappings. Do not assume Linux directories or apt exist."
     } else if cfg!(target_os = "macos") {
-        "macOS host: use macOS paths and Bash syntax. Do not assume GNU-only flags or Linux package managers."
+        "macOS host: use macOS paths and the selected Shell syntax. Do not assume GNU-only flags or Linux package managers."
     } else {
-        "Linux host: use Linux paths and Bash syntax; do not use Windows drive paths or cmd/PowerShell syntax."
+        "Linux host: use Linux paths and the selected Shell syntax; do not assume Windows drive paths exist."
+    };
+    let syntax = match settings.shell_kind.as_str() {
+        "powershell" => {
+            "Use ONLY PowerShell syntax: Get-ChildItem, Set-Content -Encoding utf8, Join-Path, $env:NAME, and PowerShell here-strings. Never use Bash heredocs, export, or Unix command assumptions. Windows PowerShell 5.1 does not support &&. Use explicit UTF-8 for file writes."
+        }
+        "cmd" => {
+            "Use ONLY Windows cmd.exe batch syntax: dir, type, copy, %NAME%, and Windows paths. Bash heredocs, export, PowerShell cmdlets and $variables are invalid. Scripts use UTF-8 code page 65001."
+        }
+        "sh" => "Use POSIX sh syntax only; avoid Bash-only features such as arrays and [[ ]].",
+        _ => {
+            "Use Bash syntax, UTF-8 file writes and quoted heredoc delimiters for literal content."
+        }
     };
     Ok(format!(
-        "Execute Bash on the user's local machine. OS: {} ({}). Shell executable: {}. Initial working directory on EVERY call: {}. Each call starts a fresh shell; cd does not persist between calls. NOT a hosted Linux sandbox: never assume /mnt/data or /home/oai/share exists. {} Check available tools and directories first. Scripts are delivered as UTF-8; write text files as UTF-8 and use quoted heredoc delimiters for literal content. {}",
+        "Shell type: {}. {} Execute commands on the user's local machine. OS: {} ({}). Shell executable: {}. Initial working directory on EVERY call: {}. Each call starts a fresh shell; cd does not persist between calls. NOT a hosted Linux sandbox: never assume /mnt/data or /home/oai/share exists. {} Check available tools and directories first. Write text files as UTF-8 using the syntax of the selected Shell. {}",
+        settings.shell_kind,
+        syntax,
         std::env::consts::OS,
         std::env::consts::ARCH,
         settings.bash_path,
@@ -513,8 +668,23 @@ fn run_process_in(
     if let Some(directory) = directory {
         command.current_dir(directory);
     }
+    #[cfg(windows)]
+    if inferred_shell(program) == Some("cmd")
+        && args.len() >= 2
+        && args[args.len() - 2].eq_ignore_ascii_case("/C")
+    {
+        // cmd.exe parses its own command line. Rust's normal argv escaping
+        // turns embedded quotes into literal backslash-quotes for this parser.
+        use std::os::windows::process::CommandExt as _;
+        command
+            .args(&args[..args.len() - 1])
+            .raw_arg(&args[args.len() - 1]);
+    } else {
+        command.args(args);
+    }
+    #[cfg(not(windows))]
+    command.args(args);
     let mut child = command
-        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -655,7 +825,7 @@ mod output_tests {
             ..Settings::default()
         };
         let mut registry = ToolRegistry::load(&settings).unwrap();
-        assert!(!registry.is_bash("bash"));
+        assert!(!registry.is_local_shell("bash"));
         assert_eq!(registry.notices.len(), 1);
         registry
             .add(
@@ -666,6 +836,94 @@ mod output_tests {
             )
             .unwrap();
         assert_eq!(registry.schemas.len(), 1);
+    }
+
+    #[test]
+    fn shell_descriptions_and_path_types_match() {
+        for kind in ["powershell", "cmd", "bash", "sh"] {
+            let settings = Settings {
+                shell_kind: kind.into(),
+                ..Settings::default()
+            };
+            let description = bash_description(&settings).unwrap();
+            assert!(description.contains(&format!("Shell type: {kind}.")));
+            if kind == "powershell" {
+                assert!(description.contains("Use ONLY PowerShell syntax"));
+            }
+            if kind == "cmd" {
+                assert!(description.contains("Use ONLY Windows cmd.exe batch syntax"));
+            }
+        }
+        let settings = Settings {
+            shell_kind: "bash".into(),
+            bash_path: "powershell.exe".into(),
+            ..Settings::default()
+        };
+        assert!(
+            resolve_shell(&settings)
+                .unwrap_err()
+                .to_string()
+                .contains("不匹配")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_and_cmd_preserve_unicode_and_configured_directory() {
+        let root = std::env::temp_dir().join(format!("Mori Shell 中文 {}", crate::model::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for (kind, program, script) in [
+            (
+                "powershell",
+                "powershell.exe",
+                "Set-Content -LiteralPath './中文.txt' -Value '你好 🌿' -Encoding utf8; [Console]::Write('你好 🌿')",
+            ),
+            ("cmd", "cmd.exe", "echo 你好>cmd.txt\necho 命令完成"),
+        ] {
+            let settings = Settings {
+                tools_enabled: true,
+                bash_enabled: true,
+                shell_kind: kind.into(),
+                bash_path: program.into(),
+                bash_working_directory: root.to_string_lossy().into_owned(),
+                ..Settings::default()
+            };
+            let mut registry = ToolRegistry::load(&settings).unwrap();
+            assert!(registry.notices.is_empty(), "{:?}", registry.notices);
+            assert_eq!(registry.schemas[0]["function"]["name"], "shell");
+            assert!(registry.is_local_shell("shell"));
+            let script = if kind == "powershell" {
+                format!("# {}\n{script}", "长脚本".repeat(10000))
+            } else {
+                script.to_string()
+            };
+            let call = ToolCall {
+                name: "shell".into(),
+                arguments: json!({"command":script}).to_string(),
+                ..ToolCall::default()
+            };
+            let output = registry
+                .execute(&call, &settings, &AtomicBool::new(false))
+                .unwrap();
+            assert!(
+                output.contains(if kind == "cmd" {
+                    "命令完成"
+                } else {
+                    "你好 🌿"
+                }),
+                "{output}"
+            );
+            let content = std::fs::read_to_string(root.join(if kind == "cmd" {
+                "cmd.txt"
+            } else {
+                "中文.txt"
+            }))
+            .unwrap();
+            assert!(content.contains("你好"), "{content}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        let automatic = resolve_shell(&Settings::default()).unwrap();
+        assert!(["powershell", "cmd", "bash"].contains(&automatic.shell_kind.as_str()));
     }
 
     #[test]

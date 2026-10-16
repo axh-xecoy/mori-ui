@@ -546,6 +546,56 @@ print(greet("Mori"))
             window.render_to_image().unwrap().save(directory.join("connection-deleted-empty.png")).unwrap();
         });
         eprintln!("connection deletion, selection, pending discovery and history regression: {result:?}");
+        let result=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx| {
+                this.page=Page::Settings;this.settings_tab=SettingsTab::Connections;
+                this.toast=None;this.rename=false;
+                this.add_connection(window,cx);
+                this.provider_name.update(cx,|state,cx|state.focus(window,cx));
+                cx.notify();
+            });let _=window.draw(cx);
+            assert!(view.read(cx).provider_name.read(cx).focus_handle(cx).is_focused(window));
+            let position=point(px(1200.),px(100.));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,click_count:1,position,..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position,..Default::default()}),cx);
+            assert!(!view.read(cx).provider_name.read(cx).focus_handle(cx).is_focused(window),"Clicking settings background must blur inputs");
+            let input_position=point(px(500.),px(346.));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,click_count:1,position:input_position,..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position:input_position,..Default::default()}),cx);
+            assert!(view.read(cx).provider_name.read(cx).focus_handle(cx).is_focused(window),"Clicking the input itself must retain focus");
+            view.update(cx,|this,cx| {
+                this.new_chat(window,cx);
+                this.current_mut().unwrap().messages.push(Message::new("assistant","这是用于验证标题栏的正文。移动鼠标不应选择文本。"));
+                this.composer.update(cx,|state,cx|state.focus(window,cx));
+                cx.notify();
+            });let _=window.draw(cx);
+            let blank=point(px(1200.),px(200.));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,click_count:1,position:blank,..Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position:blank,..Default::default()}),cx);
+            assert!(view.read(cx).composer.read(cx).focus_handle(cx).is_focused(window),"Chat composer keeps focus on blank clicks");
+            let titlebar=point(px(400.),px(-15.));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,click_count:1,position:titlebar,..Default::default()}),cx);
+            // Native titlebar drag loops may consume the mouse-up event.
+            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent {position:point(px(900.),px(240.)),pressed_button:None,modifiers:Default::default()}),cx);
+            assert!(!gpui_kit::base::TextSelection::has_selection(window,cx),"A released titlebar click must not select document text");
+            let text_point = (100..400).step_by(5).flat_map(|y| (200..1000).step_by(5).map(move |x| point(px(x as f32), px(y as f32))))
+                .find(|position| {
+                    window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent {position:*position,pressed_button:None,modifiers:Default::default()}),cx);
+                    gpui_kit::base::TextSelection::is_selectable_at(*position,window,cx)
+                }).expect("Visible chat text");
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {button:MouseButton::Left,click_count:1,position:text_point,..Default::default()}),cx);
+            let end = point(text_point.x + px(100.), text_point.y + px(25.));
+            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent {position:end,pressed_button:Some(MouseButton::Left),modifiers:Default::default()}),cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {button:MouseButton::Left,position:end,..Default::default()}),cx);
+            assert!(gpui_kit::base::TextSelection::has_selection(window,cx),"Normal text dragging must still select content");
+            gpui_kit::base::TextSelection::clear(window,cx);
+            view.update(cx,|this,cx| {this.page=Page::Settings;this.settings_tab=SettingsTab::General;cx.notify();});
+            let _=window.draw(cx);
+            window.dispatch_event(PlatformInput::ScrollWheel(ScrollWheelEvent {position:point(px(1050.),px(600.)),delta:ScrollDelta::Pixels(point(px(0.),px(-900.))),..Default::default()}),cx);
+            let _=window.draw(cx);
+            window.render_to_image().unwrap().save(directory.join("shell-settings.png")).unwrap();
+        });
+        eprintln!("settings blur, chat focus and titlebar selection regression: {result:?}");
         std::fs::write(directory.join("passed.txt"),"All native regressions passed.\n").unwrap();
         cx.update(|cx|cx.quit());
     }).detach();

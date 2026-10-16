@@ -70,7 +70,7 @@ API Key 保存到系统凭据库，不写入会话 JSON。可用服务商 ID 对
 
 未填写的设置保留当前值。高级编辑器不包含语言、发送方式、主题和侧栏宽度，避免扩展配置覆盖界面偏好。自定义函数的结构为 `name`、`description`、`parameters`（JSON Schema）、`command`、`args`、`enabled`。参数 JSON 通过 stdin 交给指定程序，stdout / stderr 返回模型。Bash 和函数程序不在沙箱中运行；实际执行前会显示参数并请求确认。每次生成最多 12 轮工具调用，函数 / Bash 单次执行最多 60 秒。
 
-Bash 默认在系统桌面目录执行，支持 Windows 桌面重定向；每次调用独立启动，可在同一条命令中用 `cd` 切换目录。通过非登录 `bash -s --` 的 stdin 传入 UTF-8 脚本，避免 Windows Bash 的命令行参数编码破坏中文 heredoc 内容。模型会收到本机操作系统、实际桌面路径、Shell 和路径用法说明，不应假设存在 `/mnt/data` 等托管环境目录。桌面无法定位或不可访问时返回明确错误。长参数与输出各有独立滚动条，滚动到边界也不会带动聊天页面。
+Bash 默认在用户主目录（`~`）执行，可在通用设置中配置工作目录；每次调用独立启动，可在同一条命令中用 `cd` 切换目录。通过非登录 `bash -s --` 的 stdin 传入 UTF-8 脚本，避免 Windows Bash 的命令行参数编码破坏中文 heredoc 内容。模型会收到本机操作系统、配置的工作目录、Shell 和路径用法说明，不应假设存在 `/mnt/data` 等托管环境目录。工作目录不可访问或 Bash 不可用时跳过本机命令工具并返回明确提示。长参数与输出各有独立滚动条，滚动到边界也不会带动聊天页面。
 
 ## 能力范围
 
@@ -173,3 +173,11 @@ OpenAI 兼容是消息接口兼容，并不意味着所有服务使用同一个�
 规范参考：[OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning)、[LM Studio API 与兼容限制讨论](https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/988)、[Qwen vLLM](https://github.com/QwenLM/Qwen3/blob/main/docs/source/deployment/vllm.md)、[百炼](https://help.aliyun.com/zh/model-studio/deep-thinking/)、[Gemini OpenAI 兼容](https://ai.google.dev/gemini-api/docs/openai)、[Groq reasoning](https://console.groq.com/docs/reasoning)。
 
 新附件按 SHA-256 存储并复用同内容文件；静态 PNG 会统一编码以复用文件与剪贴板入口。原始附件名称属于会话元数据，不参与存储去重。历史文件保持可读，不自动删除旧引用；同一草稿不会重复显示同一路径的附件。
+
+### Bash 工作环境
+
+在“设置 → 通用 → Bash 本机命令”配置 Bash 可执行文件和默认工作目录，点击“保存并检测 Bash”保存。默认目录 `~` 表示当前用户主目录，支持绝对路径和 `~/子目录`。每次调用启动独立 Shell，`cd` 不跨调用保留。路径须已存在，不会自动创建。
+
+启用工具后，Mori 会在后台检查 Bash 是否可以运行。未安装、路径无效或启动超时时，会跳过 Bash 工具并告知模型，聊天和其他已配置工具不受影响。Mori 不会自动安装 Bash 或改用 PowerShell。Windows 可安装 Git Bash 并配置其 `bash.exe` 完整路径；仅有未配置发行版的 WSL 启动程序不能使用。
+
+提供给模型的工具说明包含实际系统（Windows、macOS 或 Linux）、架构、Bash 程序路径及展开后的工作目录，并按平台说明路径和命令差异；仍需模型遵循说明，无法保证它从不生成错误命令。

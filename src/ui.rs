@@ -173,6 +173,8 @@ pub struct Mori {
     assistant_name: Entity<InputState>,
     assistant_prompt: Entity<TextareaState>,
     advanced: Entity<TextareaState>,
+    bash_program: Entity<InputState>,
+    bash_directory: Entity<InputState>,
     title_input: Entity<InputState>,
     selected_provider: usize,
     selected_assistant: usize,
@@ -363,6 +365,13 @@ impl Mori {
                 .submit_on_enter(library.settings.send_on_enter)
                 .auto_grow(3, 9)
         });
+        let bash_program = cx.new(|cx| {
+            InputState::new(window, cx).default_value(library.settings.bash_path.clone())
+        });
+        let bash_directory = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(library.settings.bash_working_directory.clone())
+        });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("搜索对话")));
         let provider_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("连接名称")));
         let provider_url =
@@ -485,6 +494,8 @@ impl Mori {
             recording: None,
             last_deleted: None,
             compact: false,
+            bash_program,
+            bash_directory,
             show_advanced: false,
             temperature,
             max_tokens,

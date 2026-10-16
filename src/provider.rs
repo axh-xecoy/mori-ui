@@ -996,11 +996,15 @@ pub fn run(mut request: Request, tx: mpsc::Sender<Event>, cancel: Arc<AtomicBool
             request.provider.backend = resolve_backend(&request.provider);
         }
         let mut registry = ToolRegistry::load(&request.settings)?;
-        if registry.is_bash("bash") {
+        if request.settings.tools_enabled {
             request.prompt.push_str(&format!(
-                "\n\n[Mori runtime environment]\nEnabled tools execute locally on the user's {} machine, not in a hosted Linux sandbox. Follow the bash tool's actual Desktop working directory and path instructions when creating files.",
+                "\n\n[Mori runtime environment]\nEnabled tools execute locally on the user's {} machine, not in a hosted Linux sandbox. Follow the bash tool's configured working directory and platform-specific path instructions when creating files.",
                 std::env::consts::OS
             ));
+        }
+        for notice in &registry.notices {
+            request.prompt.push_str(&format!("\n[Mori tool availability] {notice} Do not call unavailable tools or claim commands were executed."));
+            let _ = tx.send(Event::Status(notice.clone()));
         }
         let mut history = request.conversation.messages.clone();
         for message in &mut history {

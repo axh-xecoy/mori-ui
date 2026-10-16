@@ -328,7 +328,32 @@ impl Mori {
                 )),
                 p,
             ))
-            .child(label("配置已自动保存", p.muted))
+            .child(div().h(px(1.)).bg(rgb(p.line)))
+            .child(div().font_weight(FontWeight::MEDIUM).child("Bash 本机命令"))
+            .child(label("默认工作目录为 ~（用户主目录），支持绝对路径或 ~/子目录。每次调用均从此目录开始。", p.muted))
+            .child(label("Bash 可执行文件", p.muted))
+            .child(Input::new(&self.bash_program).w_full())
+            .child(label("默认工作目录", p.muted))
+            .child(Input::new(&self.bash_directory).w_full())
+            .child(label("未安装 Bash 时会跳过本机命令工具，聊天和其他工具仍可使用。Windows 可安装 Git Bash 后指定其完整路径。", p.muted))
+            .child(button("save-bash-settings", "保存并检测 Bash", "check").on_click(cx.listener(|this, _, w, cx| {
+                let program = this.bash_program.read(cx).value().trim().to_string();
+                let directory = this.bash_directory.read(cx).value().trim().to_string();
+                if program.is_empty() {
+                    this.show_toast("请填写 Bash 可执行文件路径".into()); cx.notify(); return;
+                }
+                this.library.settings.bash_path = program;
+                this.library.settings.bash_working_directory = if directory.is_empty() { "~".into() } else { directory };
+                this.load_advanced(w, cx);
+                this.persist();
+                let settings = this.library.settings.clone();
+                let tx = this.work_tx.clone();
+                std::thread::spawn(move || {
+                    let result = crate::tools::validate_bash(&settings).map(|()| "Bash 配置已保存，检测通过".to_string());
+                    let _ = tx.send(Work::Notice(result));
+                }); cx.notify();
+            })))
+            .child(label("其他配置自动保存；Bash 路径修改需点击保存按钮。", p.muted))
     }
     pub(super) fn add_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.library.providers.push(Provider::custom());

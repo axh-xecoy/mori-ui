@@ -204,6 +204,7 @@ pub enum Target {
 }
 pub struct ToolRegistry {
     pub schemas: Vec<Value>,
+    pub notices: Vec<String>,
     pub targets: std::collections::HashMap<String, Target>,
     pub clients: Vec<McpClient>,
 }
@@ -211,6 +212,7 @@ impl ToolRegistry {
     pub fn load(settings: &Settings) -> Result<Self> {
         let mut this = Self {
             schemas: vec![],
+            notices: vec![],
             targets: Default::default(),
             clients: vec![],
         };
@@ -218,7 +220,10 @@ impl ToolRegistry {
             return Ok(this);
         }
         if settings.bash_enabled {
-            this.add("bash".into(), bash_description(settings)?, json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?;
+            match validate_bash(settings) {
+                Ok(()) => this.add("bash".into(), bash_description(settings)?, json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), Target::Bash)?,
+                Err(error) => this.notices.push(format!("Bash 不可用，已跳过本机命令工具：{error:#}。聊天与其他工具仍可使用，请在设置中配置 Bash。")),
+            }
         }
         for f in settings.functions.iter().filter(|f| f.enabled) {
             this.add(
@@ -287,7 +292,7 @@ impl ToolRegistry {
         match self.targets.get(&call.name).context("工具不存在或未启用")? {
             Target::Bash => {
                 let command = args["command"].as_str().context("缺少 command")?;
-                let desktop = desktop_directory()?;
+                let desktop = bash_directory(settings)?;
                 run_bash(&settings.bash_path, command, cancel, &desktop)
             }
             Target::Function(f) => run_process(&f.command, &f.args, Some(&call.arguments), cancel),
@@ -403,25 +408,71 @@ fn run_process(
     run_process_in(program, args, input, cancel, None)
 }
 
-fn desktop_directory() -> Result<std::path::PathBuf> {
-    let desktop = directories::UserDirs::new()
-        .and_then(|dirs| dirs.desktop_dir().map(std::path::Path::to_path_buf))
-        .context("无法定位系统桌面目录")?;
-    if !desktop.is_dir() {
-        bail!("桌面目录不存在或不可访问：{}", desktop.display());
+pub fn bash_directory(settings: &Settings) -> Result<std::path::PathBuf> {
+    let dirs = directories::UserDirs::new().context("无法定位用户主目录")?;
+    let value = settings.bash_working_directory.trim();
+    let path = if value.is_empty() || value == "~" {
+        dirs.home_dir().to_path_buf()
+    } else if value.starts_with("~/") || value.starts_with("~\\") {
+        dirs.home_dir().join(&value[2..])
+    } else {
+        std::path::PathBuf::from(value)
+    };
+    anyhow::ensure!(path.is_absolute(), "工作目录必须是绝对路径或以 ~/ 开头");
+    anyhow::ensure!(
+        path.is_dir(),
+        "工作目录不存在或不可访问：{}",
+        path.display()
+    );
+    Ok(path)
+}
+
+// Executed on a worker thread; never probe a process during rendering.
+pub fn validate_bash(settings: &Settings) -> Result<()> {
+    let mut child = hidden_command(&settings.bash_path)
+        .args(["--noprofile", "--norc", "-c", "test -n \"$BASH_VERSION\""])
+        .current_dir(bash_directory(settings)?)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("无法启动 {}", settings.bash_path))?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            anyhow::ensure!(
+                status.success(),
+                "Bash 启动失败（{status}），请检查程序路径；Windows WSL 占位程序可能尚未配置发行版"
+            );
+            return Ok(());
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Bash 启动检测超时");
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    Ok(desktop)
 }
 
 fn bash_description(settings: &Settings) -> Result<String> {
-    let desktop = desktop_directory()?.to_string_lossy().replace('\\', "/");
+    let directory = bash_directory(settings)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let platform = if cfg!(windows) {
+        "Windows host: the shell is Bash, not PowerShell or cmd. Use quoted forward-slash drive paths or relative paths. Git Bash/MSYS and WSL have different path mappings: inspect pwd first. Do not assume Linux system directories or apt exist."
+    } else if cfg!(target_os = "macos") {
+        "macOS host: use macOS paths and Bash syntax. Do not assume GNU-only flags or Linux package managers."
+    } else {
+        "Linux host: use Linux paths and Bash syntax; do not use Windows drive paths or cmd/PowerShell syntax."
+    };
     Ok(format!(
-        "Execute Bash on the user's local machine. OS: {} ({}). Shell executable: {}. Initial working directory on EVERY call: {} (the actual system Desktop). Each call starts a fresh shell; cd does not persist between calls. This is a local desktop application, NOT a hosted Linux sandbox. Do not assume /mnt/data, /home/oai/share, or /tmp are available. On Windows use quoted forward-slash drive paths such as '{}' or relative paths from Desktop, e.g. cat > './cute_snake_game.html' <<'EOF'. Check pwd and available tools when needed; never invent directories. Scripts are delivered as UTF-8; write text files as UTF-8, and use a quoted heredoc delimiter for literal content. {}",
+        "Execute Bash on the user's local machine. OS: {} ({}). Shell executable: {}. Initial working directory on EVERY call: {}. Each call starts a fresh shell; cd does not persist between calls. NOT a hosted Linux sandbox: never assume /mnt/data or /home/oai/share exists. {} Check available tools and directories first. Scripts are delivered as UTF-8; write text files as UTF-8 and use quoted heredoc delimiters for literal content. {}",
         std::env::consts::OS,
         std::env::consts::ARCH,
         settings.bash_path,
-        desktop,
-        desktop,
+        directory,
+        platform,
         if settings.bash_trusted {
             "The user enabled trusted execution."
         } else {
@@ -596,27 +647,70 @@ mod output_tests {
     }
 
     #[test]
-    fn bash_schema_describes_the_real_host_and_desktop() {
+    fn missing_bash_does_not_disable_other_tools() {
+        let settings = Settings {
+            tools_enabled: true,
+            bash_enabled: true,
+            bash_path: "mori-nonexistent-bash-executable".into(),
+            ..Settings::default()
+        };
+        let mut registry = ToolRegistry::load(&settings).unwrap();
+        assert!(!registry.is_bash("bash"));
+        assert_eq!(registry.notices.len(), 1);
+        registry
+            .add(
+                "other_tool".into(),
+                "independent".into(),
+                json!({}),
+                Target::Mcp(0, "test".into()),
+            )
+            .unwrap();
+        assert_eq!(registry.schemas.len(), 1);
+    }
+
+    #[test]
+    fn working_directory_expands_home_and_rejects_invalid_paths() {
+        let mut settings = Settings::default();
+        let home = directories::UserDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        assert_eq!(bash_directory(&settings).unwrap(), home);
+        settings.bash_working_directory = "~/".into();
+        assert_eq!(bash_directory(&settings).unwrap(), home);
+        settings.bash_working_directory = "relative/path".into();
+        assert!(bash_directory(&settings).is_err());
+        settings.bash_working_directory = home
+            .join("mori-missing-directory-fixture")
+            .to_string_lossy()
+            .into_owned();
+        assert!(bash_directory(&settings).is_err());
+        let old: Settings =
+            serde_json::from_str(r#"{"send_on_enter":true,"bash_path":"custom-shell"}"#).unwrap();
+        assert!(old.send_on_enter);
+        assert_eq!(old.bash_path, "custom-shell");
+        assert_eq!(old.bash_working_directory, "~");
+    }
+
+    #[test]
+    fn bash_schema_describes_the_real_host_and_home() {
         let settings = Settings {
             tools_enabled: true,
             bash_enabled: true,
             ..Settings::default()
         };
-        let registry = ToolRegistry::load(&settings).unwrap();
-        let description = registry.schemas[0]["function"]["description"]
-            .as_str()
-            .unwrap();
+        let description = bash_description(&settings).unwrap();
         assert!(description.contains(std::env::consts::OS));
         assert!(
             description.contains(
-                &desktop_directory()
+                &bash_directory(&settings)
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/")
             )
         );
         assert!(description.contains("NOT a hosted Linux sandbox"));
-        assert!(description.contains("relative paths from Desktop"));
+        assert!(description.contains("Each call starts a fresh shell"));
     }
 
     #[test]
@@ -659,7 +753,7 @@ mod output_tests {
 
     #[cfg(windows)]
     #[test]
-    fn bash_tool_starts_in_the_actual_windows_desktop() {
+    fn bash_tool_starts_in_the_user_home() {
         let settings = Settings {
             tools_enabled: true,
             bash_enabled: true,
@@ -675,7 +769,7 @@ mod output_tests {
         let output = registry
             .execute(&call, &settings, &AtomicBool::new(false))
             .unwrap();
-        let expected = desktop_directory()
+        let expected = bash_directory(&settings)
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");

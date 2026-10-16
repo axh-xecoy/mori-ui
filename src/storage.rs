@@ -427,11 +427,26 @@ mod tests {
     use super::*;
     use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
     #[test]
+    fn empty_connections_survive_save_and_restart_without_factory_defaults() {
+        let root = std::env::temp_dir().join(format!("mori-empty-connections-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::at(root.clone());
+        let mut library = store.load().unwrap();
+        assert!(library.providers.is_empty());
+        library.settings.send_on_enter = true;
+        store.save(&library).unwrap();
+        let loaded = Store::at(root.clone()).load().unwrap();
+        assert!(loaded.providers.is_empty());
+        assert!(loaded.settings.send_on_enter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn model_profiles_survive_stale_instances_and_legacy_library_writes() {
         let root = std::env::temp_dir().join(format!("mori-profiles-test-{}", id()));
         std::fs::create_dir_all(&root).unwrap();
         let active = Store::at(root.clone());
         let mut library = active.load().unwrap();
+        library.providers.push(Provider::custom());
         library.providers[0].models = vec!["qwen3:8b".into()];
         library.providers[0].model_configs.insert(
             "qwen3:8b".into(),
@@ -489,6 +504,7 @@ mod tests {
         let mut library = store.load().unwrap();
         assert_eq!(library.settings.max_tokens, 0);
         assert!(library.settings.send_on_enter);
+        library.providers.push(Provider::custom());
         library.providers[0].models.push("qwen3:8b".into());
         library.providers[0].model_configs.insert(
             "qwen3:8b".into(),

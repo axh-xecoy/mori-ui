@@ -51,76 +51,17 @@ impl Provider {
             .unwrap_or(model)
             .into()
     }
-    fn preset(name: &str, protocol: Protocol, url: &str, models: &[&str]) -> Self {
+    pub fn custom() -> Self {
         Self {
-            id: name.to_lowercase().replace(' ', "-"),
-            name: name.into(),
-            protocol,
+            id: id(),
+            name: crate::i18n::tr("新连接"),
+            protocol: Protocol::OpenAi,
             backend: OpenAiBackend::Auto,
-            base_url: url.into(),
-            models: models.iter().map(|s| s.to_string()).collect(),
+            base_url: String::new(),
+            models: vec![],
             model_configs: Default::default(),
             enabled: true,
         }
-    }
-    pub fn presets() -> Vec<Self> {
-        vec![
-            Self::preset("Ollama", Protocol::Ollama, "http://localhost:11434", &[]),
-            Self::preset(
-                "OpenAI",
-                Protocol::OpenAi,
-                "https://api.openai.com/v1",
-                &["gpt-4.1", "gpt-4.1-mini", "o3", "gpt-4o"],
-            ),
-            Self::preset(
-                "Anthropic",
-                Protocol::Anthropic,
-                "https://api.anthropic.com/v1",
-                &["claude-sonnet-4-5", "claude-opus-4-1"],
-            ),
-            Self::preset(
-                "Gemini",
-                Protocol::OpenAi,
-                "https://generativelanguage.googleapis.com/v1beta/openai",
-                &["gemini-2.5-pro", "gemini-2.5-flash"],
-            ),
-            Self::preset(
-                "DeepSeek",
-                Protocol::OpenAi,
-                "https://api.deepseek.com",
-                &["deepseek-chat", "deepseek-reasoner"],
-            ),
-            Self::preset(
-                "Qwen",
-                Protocol::OpenAi,
-                "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                &["qwen-plus", "qwen-turbo", "qwen-vl-max"],
-            ),
-            Self::preset(
-                "SiliconFlow",
-                Protocol::OpenAi,
-                "https://api.siliconflow.cn/v1",
-                &["Qwen/Qwen3-8B"],
-            ),
-            Self::preset(
-                "OpenRouter",
-                Protocol::OpenAi,
-                "https://openrouter.ai/api/v1",
-                &[],
-            ),
-            Self::preset(
-                "Groq",
-                Protocol::OpenAi,
-                "https://api.groq.com/openai/v1",
-                &[],
-            ),
-            Self::preset(
-                "LM Studio",
-                Protocol::OpenAi,
-                "http://localhost:1234/v1",
-                &[],
-            ),
-        ]
     }
 }
 
@@ -392,7 +333,7 @@ impl Library {
 impl Default for Library {
     fn default() -> Self {
         Self {
-            providers: Provider::presets(),
+            providers: vec![],
             conversations: vec![],
             assistants: Assistant::presets(),
             settings: Settings::default(),
@@ -407,6 +348,10 @@ mod tests {
     #[test]
     fn new_chats_do_not_inherit_removed_or_disabled_models() {
         let mut library = Library::default();
+        library.providers.push(Provider::custom());
+        let mut fallback = Provider::custom();
+        fallback.models = vec!["fallback".into()];
+        library.providers.push(fallback);
         let p = &mut library.providers[0];
         p.models = vec!["available".into()];
         let pid = p.id.clone();
@@ -434,6 +379,17 @@ mod tests {
             provider.models.clear();
         }
         assert!(library.preferred_model(Some(&current), 99).1.is_empty());
+    }
+    #[test]
+    fn connections_start_empty_and_custom_connections_have_no_models_or_endpoint() {
+        let library = Library::default();
+        assert!(library.providers.is_empty());
+        let decoded: Library = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(decoded.providers.is_empty());
+        let provider = Provider::custom();
+        assert!(provider.models.is_empty());
+        assert!(provider.base_url.is_empty());
+        assert_ne!(provider.id, Provider::custom().id);
     }
     #[test]
     fn older_preferences_keep_their_values_and_gain_safe_defaults() {

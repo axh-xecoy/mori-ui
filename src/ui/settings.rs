@@ -166,7 +166,7 @@ impl Mori {
         window.set_window_title(&format!("Mori · {}", tr("留一点空间给灵感")));
         for (input, text) in [
             (&self.search, "搜索对话"),
-            (&self.provider_name, "服务商名称"),
+            (&self.provider_name, "连接名称"),
             (&self.provider_key, "新的 API Key（留空保留现有密钥）"),
             (&self.model_name_input, "默认使用模型 ID"),
             (&self.model_temperature, "服务商默认"),
@@ -330,8 +330,38 @@ impl Mori {
             ))
             .child(label("配置已自动保存", p.muted))
     }
+    pub(super) fn add_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.library.providers.push(Provider::custom());
+        self.load_provider(self.library.providers.len() - 1, window, cx);
+        self.provider_picker = false;
+        self.persist();
+        cx.notify();
+    }
     fn render_connections(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let selected = &self.library.providers[self.selected_provider];
+        let selected = self.library.providers.get(self.selected_provider);
+        if selected.is_none() {
+            return card(p)
+                .p_6()
+                .gap_4()
+                .child(icon("plug").size(px(28.)).text_color(rgb(p.accent)))
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(tr("添加你的第一个连接")),
+                )
+                .child(label(
+                    "选择接口协议，填写地址和密钥，再获取或手动添加模型。",
+                    p.muted,
+                ))
+                .child(
+                    Button::new("first-connection")
+                        .primary()
+                        .label(tr("添加连接"))
+                        .on_click(cx.listener(|this, _, w, cx| this.add_connection(w, cx))),
+                );
+        }
+        let selected = selected.unwrap();
         let list = card(p)
             .p_3()
             .gap_1()
@@ -341,7 +371,7 @@ impl Mori {
                     .px_2()
                     .py_2()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr("服务商")),
+                    .child(tr("模型连接")),
             )
             .when(self.compact, |d| {
                 d.child(
@@ -382,22 +412,9 @@ impl Mori {
                 )
             })
             .child(
-                button("add-provider", "添加兼容服务商", "plus")
+                button("add-provider", "添加连接", "plus")
                     .w_full()
-                    .on_click(cx.listener(|this, _, w, cx| {
-                        this.library.providers.push(Provider {
-                            id: id(),
-                            name: tr("自定义服务商"),
-                            protocol: Protocol::OpenAi,
-                            backend: OpenAiBackend::Auto,
-                            base_url: "https://api.example.com/v1".into(),
-                            models: vec![],
-                            model_configs: Default::default(),
-                            enabled: true,
-                        });
-                        this.load_provider(this.library.providers.len() - 1, w, cx);
-                        this.persist();
-                    })),
+                    .on_click(cx.listener(|this, _, w, cx| this.add_connection(w, cx))),
             );
         div()
             .flex()
@@ -442,7 +459,7 @@ impl Mori {
                     .flex_wrap()
                     .gap_4()
                     .child(
-                        field("服务商名称", Input::new(&self.provider_name), p)
+                        field("连接名称", Input::new(&self.provider_name), p)
                             .flex_1()
                             .min_w(px(200.)),
                     )
@@ -450,7 +467,7 @@ impl Mori {
                         "接口协议",
                         div().flex().flex_wrap().gap_1().children(
                             [
-                                (Protocol::OpenAi, "OpenAI"),
+                                (Protocol::OpenAi, "OpenAI 兼容"),
                                 (Protocol::Ollama, "Ollama"),
                                 (Protocol::Anthropic, "Anthropic"),
                             ]

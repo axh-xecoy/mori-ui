@@ -105,3 +105,11 @@ llama.cpp 思考适配：OpenAI 兼容后端有自动 / 标准 / llama.cpp 选�
 - 兼容后端新增 LM Studio、vLLM / SGLang；LM Studio 预设名称和 models owned_by 支持自动识别，无法识别的自建服务可手动指定。通用 Qwen 兼容服务使用 chat_template_kwargs.enable_thinking，百炼/硅基流动使用 enable_thinking，LM Studio 使用 reasoning_effort；保留 llama.cpp、Ollama、Anthropic、DeepSeek、OpenRouter 适配，补充 Gemini 和 Groq 的独立规则。
 - 显式思考开关在高级参数合并后应用；开启时保留已有有效 reasoning_effort 和 Anthropic 思考预算。自动模式保持用户原始参数。已知不能完全关闭思考的模型报出明确说明；普通 GPT-4/3.5 关闭状态正常聊天，开启思考给出不支持提示。
 - 验证：48 项测试通过，1 项依赖外部 llama.cpp 的测试跳过；包含真实本地 HTTP 请求捕获、文件/位图别名、PNG 跨入口复用、并发写入、参数冲突与后端矩阵。原生 UI 回归覆盖重复异步完成事件仅显示一个预览、后台会话草稿去重，并重跑输入、滚动和提示条点击隔离。云服务无凭据实测；旧版 LM Studio 或不支持开关的模型模板可能仍忽略 reasoning_effort，不能仅凭请求参数断言模型执行了切换。
+
+### 仅自定义模型连接
+
+- 删除内置服务商工厂和示例模型列表。新库、缺省 providers 字段以及空连接保存后重启都保持空列表，应用启动不再自动补齐服务商。
+- 添加连接仅生成随机 ID、可编辑名称、默认协议选择；地址、密钥、模型均不预填。连接配置围绕 OpenAI 兼容 / Ollama 原生 / Anthropic 协议，保留兼容后端参数适配。
+- 新增空连接引导，统一“连接名称 / 添加连接 / 管理连接”及英文翻译。已有保存的连接、模型配置、密钥标识和聊天引用保留。
+- 修复无连接时初始化输入框及媒体服务商选择的索引访问；空地址不能被保存为有效连接。
+- 50 项测试通过，1 项外部服务测试跳过；Clippy 全目标 visual-test 检查通过。全新数据目录启动并完成原生 UI 回归，覆盖空连接设置界面、自定义连接创建、空地址校验、按协议保存及无预设模型；截图 connections-empty.png / connections-custom.png 已检查。

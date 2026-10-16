@@ -26,6 +26,12 @@ pub fn tr(text: &str) -> String {
         }
     }
     match text {
+        "新连接" => "New connection",
+        "连接名称" => "Connection name",
+        "管理连接" => "Manage connections",
+        "添加你的第一个连接" => "Add your first connection",
+        "选择接口协议，填写地址和密钥，再获取或手动添加模型。" => "Choose a protocol, enter the endpoint and API key, then fetch or add models.",
+        "OpenAI 兼容" => "OpenAI compatible",
         "兼容后端" => "Compatible backend",
         "自动识别" => "Detect automatically",
         "标准兼容" => "Standard compatible",

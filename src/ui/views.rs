@@ -1704,7 +1704,7 @@ impl Mori {
                     }),
             )
             .child(
-                button("configure-models", "管理服务商", "settings-2").on_click(cx.listener(
+                button("configure-models", "管理连接", "settings-2").on_click(cx.listener(
                     |this, _, w, cx| {
                         this.settings_tab = SettingsTab::Connections;
                         this.navigate(Page::Settings, w, cx);

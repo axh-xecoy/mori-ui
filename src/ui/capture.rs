@@ -49,6 +49,13 @@ pub fn start(
     }));
     view.update(cx, |this, _| {
         this.store = None;
+        // Explicit test fixture; production starts with no connections.
+        let mut fixture = Provider::custom();
+        fixture.id = "ollama".into();
+        fixture.name = "测试连接".into();
+        fixture.protocol = Protocol::Ollama;
+        fixture.base_url = "http://localhost:11434".into();
+        this.library.providers = vec![fixture];
         this.library.conversations.clear();
         this.library.active_id = None;
     });
@@ -493,6 +500,30 @@ print(greet("Mori"))
         });
         eprintln!("toast shield removal restores export: {result:?}");
         EXPORT_PROBE.with(|count|count.set(None));
+        let result=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx| {
+                this.library.providers.clear();this.load_provider(0,window,cx);
+                assert!(this.selected_chat_provider().is_none());
+                this.page=Page::Settings;this.settings_tab=SettingsTab::Connections;
+                this.library.settings.dark=false;Theme::change(ThemeMode::Light,Some(window),cx);Mori::tint(cx,false);
+                cx.notify();
+            });let _=window.draw(cx);
+            window.render_to_image().unwrap().save(directory.join("connections-empty.png")).unwrap();
+            view.update(cx,|this,cx| {
+                this.add_connection(window,cx);
+                let p=&this.library.providers[0];assert!(p.models.is_empty());assert!(p.base_url.is_empty());assert_eq!(p.protocol,Protocol::OpenAi);
+                assert!(!this.save_provider(window,cx),"A blank endpoint cannot be saved as a ready connection");
+                this.toast=None;
+                this.provider_name.update(cx,|s,cx|s.set_value("我的自定义连接",window,cx));
+                this.provider_url.update(cx,|s,cx|s.set_value("http://localhost:11434/v1",window,cx));
+                this.library.providers[0].protocol=Protocol::Ollama;
+                assert!(this.save_provider(window,cx));assert_eq!(this.library.providers[0].base_url,"http://localhost:11434");
+                assert!(this.library.providers[0].models.is_empty());
+                this.toast=None;cx.notify();
+            });let _=window.draw(cx);
+            window.render_to_image().unwrap().save(directory.join("connections-custom.png")).unwrap();
+        });
+        eprintln!("empty connections and custom-only configuration regression: {result:?}");
         std::fs::write(directory.join("passed.txt"),"All native regressions passed.\n").unwrap();
         cx.update(|cx|cx.quit());
     }).detach();

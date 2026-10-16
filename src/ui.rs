@@ -364,7 +364,7 @@ impl Mori {
                 .auto_grow(3, 9)
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("搜索对话")));
-        let provider_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("服务商名称")));
+        let provider_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("连接名称")));
         let provider_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://api.example.com/v1"));
         let provider_key = cx.new(|cx| {
@@ -497,9 +497,6 @@ impl Mori {
             mcp_url,
             _subscriptions: subscriptions,
         };
-        if this.library.providers.is_empty() {
-            this.library.providers = Provider::presets();
-        }
         if this.library.assistants.is_empty() {
             this.library.assistants = Assistant::presets();
         }
@@ -718,9 +715,9 @@ impl Mori {
     fn load_provider(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.model_editor = false;
         self.selected_provider = index;
-        let p = &self.library.providers[index];
-        let name = p.name.clone();
-        let url = p.base_url.clone();
+        let p = self.library.providers.get(index);
+        let name = p.map(|p| p.name.clone()).unwrap_or_default();
+        let url = p.map(|p| p.base_url.clone()).unwrap_or_default();
         self.provider_name
             .update(cx, |s, cx| s.set_value(name, window, cx));
         self.provider_url
@@ -740,7 +737,9 @@ impl Mori {
             cx.notify();
             return false;
         }
-        let p = &mut self.library.providers[self.selected_provider];
+        let Some(p) = self.library.providers.get_mut(self.selected_provider) else {
+            return false;
+        };
         if !key.is_empty()
             && let Err(e) = storage::set_api_key(p, &key)
         {
@@ -1429,10 +1428,12 @@ impl Mori {
         cx.notify();
     }
     fn selected_chat_provider(&self) -> Option<Provider> {
-        let id = self
-            .current()
-            .map(|c| c.provider_id.as_str())
-            .unwrap_or(&self.library.providers[self.selected_provider].id);
+        let id = self.current().map(|c| c.provider_id.as_str()).or_else(|| {
+            self.library
+                .providers
+                .get(self.selected_provider)
+                .map(|p| p.id.as_str())
+        })?;
         self.library.providers.iter().find(|p| p.id == id).cloned()
     }
     fn speak(&mut self, text: String, cx: &mut Context<Self>) {

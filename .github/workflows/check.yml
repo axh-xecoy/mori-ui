@@ -22,6 +22,15 @@ jobs:
       - name: Clippy
         run: cargo +stable clippy --locked --all-targets --features visual-test -- -D warnings
       - name: Tests
-        run: cargo +stable test --locked
+        shell: pwsh
+        run: |
+          $output = cargo +stable test --locked 2>&1 | Tee-Object -FilePath tests.log
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) {
+            $details = ($output | Select-Object -Last 160) -join "`n"
+            $escaped = $details.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Rust test failure::$escaped"
+          }
+          exit $testExit
       - name: Release build
         run: cargo +stable build --locked --release

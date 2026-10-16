@@ -13,7 +13,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh api "repos/$GH_REPO/actions/jobs/116980459742/logs" > failed-job.log
+          gh api "repos/$GH_REPO/actions/jobs/116980459742/logs" > failed-job.log 2>&1 || true
           python3 - <<'PY'
           from pathlib import Path
           lines = Path('failed-job.log').read_text().splitlines()

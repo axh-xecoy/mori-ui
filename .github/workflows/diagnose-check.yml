@@ -1,0 +1,24 @@
+name: Diagnose failed check
+on:
+  push:
+    paths: [.github/workflows/diagnose-check.yml]
+permissions:
+  actions: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read requested failed test log
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$GH_REPO/actions/jobs/116980459742/logs" > failed-job.log
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('failed-job.log').read_text().splitlines()
+          start = next((i for i, line in enumerate(lines) if 'failures:' in line), max(0,len(lines)-180))
+          text = '\n'.join(lines[start:start+150])
+          text = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print('::warning title=Original CI test failure::' + text)
+          PY

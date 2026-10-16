@@ -1,0 +1,45 @@
+name: Sync release notes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/releases/v*.md'
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BASE_SHA: ${{ github.event.before }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Update descriptions of existing releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          published_tags=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name')
+          if [[ "$BASE_SHA" == 0000000000000000000000000000000000000000 ]]; then
+            git ls-files 'docs/releases/v*.md' > "$RUNNER_TEMP/changed-release-notes.txt"
+          else
+            git diff --name-only --diff-filter=AM "$BASE_SHA" "$GITHUB_SHA" -- 'docs/releases/v*.md' > "$RUNNER_TEMP/changed-release-notes.txt"
+          fi
+          while IFS= read -r notes_file; do
+            [[ "$notes_file" =~ ^docs/releases/(v[[:alnum:]_.+-]+)\.md$ ]] || continue
+            tag="${BASH_REMATCH[1]}"
+            if grep -Fxq -- "$tag" <<< "$published_tags"; then
+              gh release edit "$tag" --notes-file "$notes_file"
+            else
+              echo "$tag has no published release yet; its tag workflow will supply the notes."
+            fi
+          done < "$RUNNER_TEMP/changed-release-notes.txt"

@@ -92,8 +92,14 @@ jobs:
             gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
           else
             options=(--verify-tag --title "Mori $RELEASE_TAG")
-            if [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" == tag ]]; then
-              options+=(--notes-from-tag)
+            # checkout may replace a local annotated tag ref with its commit.
+            # Read the authoritative remote tag object instead.
+            remote_tag=$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '[.object.type, .object.sha] | @tsv')
+            IFS=$'\t' read -r object_type object_sha <<< "$remote_tag"
+            if [[ "$object_type" == tag ]]; then
+              notes_file="$RUNNER_TEMP/mori-release-notes.md"
+              gh api "repos/$GH_REPO/git/tags/$object_sha" --jq '.message' > "$notes_file"
+              options+=(--notes-file "$notes_file")
             else
               options+=(--generate-notes)
             fi

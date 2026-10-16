@@ -48,6 +48,8 @@ git push origin v1.0.1
 - **预发布**：tag 名包含 `-` 时，例如 `v1.1.0-rc.1`，标记为 prerelease，不设为 latest。
 - **重新运行任务**：已有 Release 时只重新上传附件，保留手工编辑过的描述。开启 immutable releases 的仓库会禁止改写已发布附件，此时应发布新版本。
 
+工作流通过 GitHub API 读取远端附注 tag，避免 checkout 将本地 tag 引用转换为 commit 后丢失注释。已发布版本需要改写说明时，编辑 `docs/releases/v版本号.md` 并推送 main；`Sync release notes` 会仅同步本次改动文件对应的已存在 Release，不创建版本、不上传附件、不移动 tag。未改变说明文件的普通推送不会改写 Release 描述。
+
 推送普通分支不会触发发布。工作流只发布已经存在的 tag，不会创建或移动 tag。若构建失败，可从 Actions 查看日志并重新运行；发布任务只会在构建成功后运行。
 
 依据：[GitHub CLI release create](https://cli.github.com/manual/gh_release_create)、[GitHub Actions push 事件](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push)。

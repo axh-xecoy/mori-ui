@@ -27,11 +27,11 @@ $notes = @'
 - 修复图片重复粘贴
 '@
 
-git tag -a v0.1.1 -m $notes
-git push origin v0.1.1
+git tag -a v1.0.1 -m $notes
+git push origin v1.0.1
 ```
 
-此命令只是使用示例，版本号与更新内容由发布者填写。长篇说明也可以保存在 UTF-8 Markdown 文件中，再执行 `git tag -a v0.1.1 -F 路径/说明.md`。正式发布前，同步 `Cargo.toml`、`Cargo.lock` 与 `assets/mori.rc` 中的应用版本；tag 名决定 Release 的名称，不会自动修改应用内版本。
+此命令只是使用示例，版本号与更新内容由发布者填写。长篇说明也可以保存在 UTF-8 Markdown 文件中，再执行 `git tag -a v1.0.1 -F 路径/说明.md`。正式发布前，同步 `Cargo.toml`、`Cargo.lock` 与 `assets/mori.rc` 中的应用版本；tag 名决定 Release 的名称，不会自动修改应用内版本。
 
 `.github/workflows/release.yml` 在推送 `v*` tag 时自动执行：
 
@@ -44,10 +44,14 @@ git push origin v0.1.1
 发布说明规则：
 
 - **附注 tag**（上面的 `git tag -a`，或签名 tag）：使用 tag 注释原文作为 Release 描述。
-- **轻量 tag**（`git tag v0.1.1`）：调用 GitHub 自动生成发布说明，内容以 GitHub 的 PR / 版本比较规则为准。
-- **预发布**：tag 名包含 `-` 时，例如 `v0.2.0-rc.1`，标记为 prerelease，不设为 latest。
+- **轻量 tag**（`git tag v1.0.1`）：调用 GitHub 自动生成发布说明，内容以 GitHub 的 PR / 版本比较规则为准。
+- **预发布**：tag 名包含 `-` 时，例如 `v1.1.0-rc.1`，标记为 prerelease，不设为 latest。
 - **重新运行任务**：已有 Release 时只重新上传附件，保留手工编辑过的描述。开启 immutable releases 的仓库会禁止改写已发布附件，此时应发布新版本。
 
 推送普通分支不会触发发布。工作流只发布已经存在的 tag，不会创建或移动 tag。若构建失败，可从 Actions 查看日志并重新运行；发布任务只会在构建成功后运行。
 
 依据：[GitHub CLI release create](https://cli.github.com/manual/gh_release_create)、[GitHub Actions push 事件](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push)。
+
+## Codex 发布技能
+
+项目内技能为 [.agents/skills/mori-release/SKILL.md](../.agents/skills/mori-release/SKILL.md)，可用 `$mori-release` 执行版本准备与发布。技能区分准备和实际发布授权，并要求跟进 Actions 到 Release 产物确认。

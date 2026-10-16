@@ -1,6 +1,6 @@
 # Mori 验收记录
 
-验收日期：2026-10-15。结论：当前是可构建、可运行的聊天客户端原型，尚未达到完整正式发行的标准。
+本文件保留历史阶段的验收记录。2026-10-16 的 v1.0.0 已完成本地发布检查，最新范围见末尾记录与 docs/releases/v1.0.0.md；远端发布状态以 GitHub Release 为准。
 
 ## 本地验证
 
@@ -128,3 +128,11 @@ llama.cpp 思考适配：OpenAI 兼容后端有自动 / 标准 / llama.cpp 选�
 - 附注或签名 tag 使用注释生成说明，轻量 tag 调用 GitHub 自动发布说明；已补充 docs/RELEASING.md 的 PowerShell 命令及版本同步要求。
 - scripts/package-release.ps1 仅在 target/release 生成产物，ZIP 包含程序、README、发布指南、项目许可证及第三方许可文件，临时目录自动清理。
 - 验证：标准 Cargo release 构建通过，打包脚本在本机执行通过；检查 ZIP 程序与 exe 哈希一致、许可证文件齐全、SHA256SUMS 为跨平台 LF 格式；YAML 解析、PowerShell 解析、Bash 语法及四种发布分支（附注、轻量、预发布、已存在 Release）本地模拟通过。未创建或推送发布 tag，因此 GitHub 托管 runner 和真实 Release 发布仍待首次 tag 验证；本机网络无法获取 actionlint 二进制，未宣称通过该工具检查。
+
+### v1.0.0 发布检查与技能
+
+- Cargo 包、锁文件、Windows 数字与字符串版本统一为 1.0.0，设置页从 CARGO_PKG_VERSION 读取版本，避免以后人工漏改。
+- 新增 .agents/skills/mori-release/SKILL.md，并安装到本机 ~/.codex/skills/mori-release；两份技能通过 skill-creator quick_validate，说明发布授权、版本同步、产物目录、带说明 tag、Actions 跟进和失败处理边界。
+- 更新说明存放在 docs/releases/v1.0.0.md，按首次正式版本列出功能及已知能力范围，不把未实现的 OCR、Responses 或云同步描述为已支持。
+- 发布前检查：51 项测试通过，1 项外部服务测试跳过；Clippy visual-test 全目标检查通过；标准 Cargo release 构建与打包通过，Windows 文件/产品版本均为 1.0.0；SHA-256 与 ZIP 内容检查通过。
+- 推送 v1.0.0 附注 tag 后由 Release Windows 工作流构建并发布。此记录描述发布前检查，实际任务结论、二进制校验值和下载以 GitHub 对应 Release 为准。

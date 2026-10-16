@@ -724,7 +724,10 @@ impl Mori {
                                     .child(label("原生 AI 聊天客户端", p.muted)),
                             ),
                     )
-                    .child(label("Mori 0.1.0 · gpui-kit 0.7.3", p.muted)),
+                    .child(label(
+                        format!("Mori {} · gpui-kit 0.7.3", env!("CARGO_PKG_VERSION")),
+                        p.muted,
+                    )),
             )
     }
 }

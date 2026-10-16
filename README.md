@@ -90,7 +90,7 @@ OpenAI 兼容连接可选择「自动识别 / 标准兼容 / llama.cpp」。自�
 
 本地正式产物统一位于 `target/release/mori.exe`，不另建发布目录。执行 `./scripts/package-release.ps1` 可在同目录生成含许可证的 ZIP 与 SHA-256 校验文件。
 
-推送 `v*` tag 会自动构建 Windows x86_64 并创建 GitHub Release。用 `git tag -a` 填写的附注会直接成为更新说明；轻量 tag 则由 GitHub 自动生成说明。`v0.2.0-rc.1` 等带连字符的 tag 标记为预发布。完整命令和规则见 [发布指南](docs/RELEASING.md)。
+推送 `v*` tag 会自动构建 Windows x86_64 并创建 GitHub Release。用 `git tag -a` 填写的附注会直接成为更新说明；轻量 tag 则由 GitHub 自动生成说明。`v1.1.0-rc.1` 等带连字符的 tag 标记为预发布。完整命令和规则见 [发布指南](docs/RELEASING.md)。也可使用项目技能 [mori-release](.agents/skills/mori-release/SKILL.md) 完成版本准备、发布和结果验收。
 
 ## 验证
 

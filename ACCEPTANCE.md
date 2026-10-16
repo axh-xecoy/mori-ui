@@ -120,3 +120,11 @@ llama.cpp 思考适配：OpenAI 兼容后端有自动 / 标准 / llama.cpp 选�
 - 删除后正确修正选中索引、关闭模型编辑/选择器；删除最后一个连接回到空引导，不补回旧预设。删除记录对应的模型别名、高级参数、后端偏好同步清理。
 - 已删除连接的异步模型发现结果被忽略，避免过期成功提示。
 - 51 项测试通过，1 项需外部服务的测试跳过，Clippy 全目标 visual-test 检查通过。原生回归覆盖删除前置条目、当前条目、最后条目、生成中阻止删除、旧聊天保留、迟到模型发现、空界面和新增连接的完整流程。
+
+### 标准发布目录与 tag 自动发布
+
+- 本地构建改用 cargo build --release --locked，产物为 target/release/mori.exe；移除项目根目录 dist 及对应忽略规则。运行中的旧程序退出后，旧目录已移入系统回收站。
+- 新增 .github/workflows/release.yml，推送 v* tag 时在 Windows x86_64 构建并测试，独立 publish 任务校验产物后通过 GITHUB_TOKEN 发布 exe、ZIP 与 SHA256SUMS.txt。仅 publish 拥有 contents: write；预发布 tag 不设为 latest；重跑保留已有 Release 描述。
+- 附注或签名 tag 使用注释生成说明，轻量 tag 调用 GitHub 自动发布说明；已补充 docs/RELEASING.md 的 PowerShell 命令及版本同步要求。
+- scripts/package-release.ps1 仅在 target/release 生成产物，ZIP 包含程序、README、发布指南、项目许可证及第三方许可文件，临时目录自动清理。
+- 验证：标准 Cargo release 构建通过，打包脚本在本机执行通过；检查 ZIP 程序与 exe 哈希一致、许可证文件齐全、SHA256SUMS 为跨平台 LF 格式；YAML 解析、PowerShell 解析、Bash 语法及四种发布分支（附注、轻量、预发布、已存在 Release）本地模拟通过。未创建或推送发布 tag，因此 GitHub 托管 runner 和真实 Release 发布仍待首次 tag 验证；本机网络无法获取 actionlint 二进制，未宣称通过该工具检查。

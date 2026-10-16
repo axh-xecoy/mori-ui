@@ -1,0 +1,104 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Windows x86_64
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: windows-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-cargo-
+      - name: Prepare desktop for local tool tests
+        run: |
+          $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+          if ([string]::IsNullOrWhiteSpace($desktop)) {
+            $desktop = Join-Path $env:USERPROFILE 'Desktop'
+          }
+          New-Item -ItemType Directory -Path $desktop -Force | Out-Null
+      - name: Check formatting
+        run: cargo +stable fmt --check
+      - name: Test
+        run: cargo +stable test --locked
+      - name: Build executable
+        run: cargo +stable build --locked --release
+      - name: Package executable and licenses
+        run: ./scripts/package-release.ps1
+      - name: Save release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          path: |
+            target/release/mori.exe
+            target/release/mori-windows-x86_64.zip
+            target/release/SHA256SUMS.txt
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: target/release
+      - name: Publish executable and archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(target/release/mori.exe target/release/mori-windows-x86_64.zip target/release/SHA256SUMS.txt)
+          (cd target/release && sha256sum --check SHA256SUMS.txt)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # A rerun updates the files without overwriting edited release notes.
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          else
+            options=(--verify-tag --title "Mori $RELEASE_TAG")
+            if [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" == tag ]]; then
+              options+=(--notes-from-tag)
+            else
+              options+=(--generate-notes)
+            fi
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              options+=(--prerelease --latest=false)
+            fi
+            gh release create "$RELEASE_TAG" "${files[@]}" "${options[@]}"
+          fi

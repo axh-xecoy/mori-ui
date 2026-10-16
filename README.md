@@ -86,6 +86,12 @@ OpenAI 兼容连接可选择「自动识别 / 标准兼容 / llama.cpp」。自�
 
 停止按钮会立即结束界面接收并保留当前回复。阻塞 HTTP 连接会在下一段响应到来或超时后释放，未实现服务商后台任务的远程取消。当前一次运行一个生成请求，支持生成中查看其他会话。
 
+## 发布 Windows 版本
+
+本地正式产物统一位于 `target/release/mori.exe`，不另建发布目录。执行 `./scripts/package-release.ps1` 可在同目录生成含许可证的 ZIP 与 SHA-256 校验文件。
+
+推送 `v*` tag 会自动构建 Windows x86_64 并创建 GitHub Release。用 `git tag -a` 填写的附注会直接成为更新说明；轻量 tag 则由 GitHub 自动生成说明。`v0.2.0-rc.1` 等带连字符的 tag 标记为预发布。完整命令和规则见 [发布指南](docs/RELEASING.md)。
+
 ## 验证
 
 当前验收结论与正式发行前的缺口见 [ACCEPTANCE.md](ACCEPTANCE.md)。GitHub Actions 在推送与 PR 时执行 Windows 构建、测试和代码检查。

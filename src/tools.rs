@@ -490,6 +490,8 @@ pub fn resolve_shell(settings: &Settings) -> Result<Settings> {
     bail!("{}", errors.join("；"))
 }
 
+const POWERSHELL_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+
 fn probe_shell(settings: &Settings) -> Result<()> {
     let args: Vec<String> = match settings.shell_kind.as_str() {
         "bash" => vec!["--noprofile", "--norc", "-c", "test -n \"$BASH_VERSION\""],
@@ -515,13 +517,24 @@ fn probe_shell(settings: &Settings) -> Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("无法启动 {}", settings.bash_path))?;
+    // Windows PowerShell loads the .NET runtime on a cold start. Shared CI
+    // runners and slower user machines can legitimately take more than 3 s.
+    let timeout = if settings.shell_kind == "powershell" {
+        POWERSHELL_STARTUP_TIMEOUT
+    } else {
+        Duration::from_secs(3)
+    };
+    wait_for_shell(&mut child, timeout)
+}
+
+fn wait_for_shell(child: &mut std::process::Child, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
             anyhow::ensure!(status.success(), "Shell 类型验证失败（{status}）");
             return Ok(());
         }
-        if start.elapsed() > Duration::from_secs(3) {
+        if start.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
             bail!("Shell 启动检测超时");
@@ -865,6 +878,25 @@ mod output_tests {
                 .to_string()
                 .contains("不匹配")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_cold_start_can_exceed_three_seconds() {
+        let mut child = hidden_command("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Milliseconds 3500; exit 0",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_for_shell(&mut child, POWERSHELL_STARTUP_TIMEOUT).unwrap();
     }
 
     #[cfg(windows)]

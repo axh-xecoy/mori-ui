@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -22,6 +26,8 @@ jobs:
       - name: Clippy
         run: cargo +stable clippy --locked --all-targets --features visual-test -- -D warnings
       - name: Tests
+        env:
+          CARGO_TERM_COLOR: never
         shell: pwsh
         run: |
           $output = cargo +stable test --locked 2>&1 | Tee-Object -FilePath tests.log

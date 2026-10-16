@@ -142,6 +142,18 @@ impl Store {
         if !saved["provider_model_configs"].is_object() {
             saved["provider_model_configs"] = serde_json::json!({});
         }
+        for pid in model_snapshot
+            .as_object()
+            .into_iter()
+            .flat_map(|m| m.keys())
+        {
+            if models.get(pid).is_none() {
+                saved["provider_model_configs"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(pid);
+            }
+        }
         for (pid, configs) in models.as_object().unwrap() {
             if !saved["provider_model_configs"][pid].is_object() {
                 saved["provider_model_configs"][pid] = serde_json::json!({});
@@ -158,6 +170,18 @@ impl Store {
         let mut backend_snapshot = self.backends_snapshot.lock().unwrap();
         if !saved["provider_backends"].is_object() {
             saved["provider_backends"] = serde_json::json!({});
+        }
+        for pid in backend_snapshot
+            .as_object()
+            .into_iter()
+            .flat_map(|m| m.keys())
+        {
+            if backends.get(pid).is_none() {
+                saved["provider_backends"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(pid);
+            }
         }
         for (pid, backend) in backends.as_object().unwrap() {
             if backend_snapshot[pid] != *backend || saved["provider_backends"].get(pid).is_none() {
@@ -426,6 +450,37 @@ pub fn set_api_key(provider: &Provider, value: &str) -> Result<()> {
 mod tests {
     use super::*;
     use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
+    #[test]
+    fn deleting_connection_removes_profiles_but_keeps_conversation_history() {
+        let root = std::env::temp_dir().join(format!("mori-delete-connection-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::at(root.clone());
+        let mut library = store.load().unwrap();
+        let mut provider = Provider::custom();
+        let pid = provider.id.clone();
+        provider.models = vec!["my-model".into()];
+        provider
+            .model_configs
+            .insert("my-model".into(), ModelConfig::default());
+        library.providers.push(provider);
+        let mut conversation = Conversation::new(pid.clone(), "my-model".into(), "general".into());
+        conversation
+            .messages
+            .push(Message::new("user", "保留这段聊天"));
+        library.conversations.push(conversation);
+        store.save(&library).unwrap();
+        library.providers.clear();
+        store.save(&library).unwrap();
+        let loaded = Store::at(root.clone()).load().unwrap();
+        assert!(loaded.providers.is_empty());
+        assert_eq!(loaded.conversations[0].provider_id, pid);
+        assert_eq!(loaded.conversations[0].messages[0].content, "保留这段聊天");
+        let preferences: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("preferences.json")).unwrap()).unwrap();
+        assert!(preferences["provider_model_configs"].get(&pid).is_none());
+        assert!(preferences["provider_backends"].get(&pid).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn empty_connections_survive_save_and_restart_without_factory_defaults() {
         let root = std::env::temp_dir().join(format!("mori-empty-connections-{}", id()));

@@ -524,6 +524,28 @@ print(greet("Mori"))
             window.render_to_image().unwrap().save(directory.join("connections-custom.png")).unwrap();
         });
         eprintln!("empty connections and custom-only configuration regression: {result:?}");
+        let result=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx| {
+                let first=this.library.providers[0].id.clone();this.new_chat(window,cx);
+                this.current_mut().unwrap().messages.push(Message::new("user","删除连接后仍然保留"));
+                let chat=this.current().unwrap().id.clone();
+                this.add_connection(window,cx);let second=this.library.providers[1].id.clone();
+                this.add_connection(window,cx);let third=this.library.providers[2].id.clone();
+                this.remove_connection(&first,window,cx);assert_eq!(this.selected_provider,1);assert_eq!(this.library.providers[1].id,third);
+                this.work_tx.send(Work::Models(first.clone(),Ok(vec!["late-model".into()]))).unwrap();
+                this.poll(cx);assert_eq!(this.toast.as_deref(),Some("连接已删除，已有聊天记录保留"));
+                this.remove_connection(&third,window,cx);assert_eq!(this.selected_provider,0);assert_eq!(this.library.providers[0].id,second);
+                this.new_chat(window,cx);let conversation=this.current().unwrap().id.clone();let (_,rx)=mpsc::channel();
+                this.generation=Some(Generation {conversation,rx,cancel:Arc::new(AtomicBool::new(false))});
+                this.remove_connection(&second,window,cx);assert_eq!(this.library.providers.len(),1,"An in-use connection must not be removed");
+                this.stop(cx);this.remove_connection(&second,window,cx);assert!(this.library.providers.is_empty());
+                assert!(this.provider_name.read(cx).value().is_empty());assert!(this.provider_url.read(cx).value().is_empty());
+                let saved=this.library.conversations.iter().find(|c|c.id==chat).unwrap();assert_eq!(saved.provider_id,first);assert_eq!(saved.messages[0].content,"删除连接后仍然保留");
+                this.page=Page::Settings;this.settings_tab=SettingsTab::Connections;this.toast=None;cx.notify();
+            });let _=window.draw(cx);
+            window.render_to_image().unwrap().save(directory.join("connection-deleted-empty.png")).unwrap();
+        });
+        eprintln!("connection deletion, selection, pending discovery and history regression: {result:?}");
         std::fs::write(directory.join("passed.txt"),"All native regressions passed.\n").unwrap();
         cx.update(|cx|cx.quit());
     }).detach();

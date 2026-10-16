@@ -26,6 +26,10 @@ pub fn tr(text: &str) -> String {
         }
     }
     match text {
+        "删除连接" => "Delete connection",
+        "移除连接和密钥，保留已有聊天" => "Remove connection and API key; keep existing chats",
+        "连接已删除，已有聊天记录保留" => "Connection deleted. Existing chats are kept.",
+        "请先停止此连接的回复或音频任务，再删除连接" => "Stop this connection's reply or audio task before deleting it",
         "新连接" => "New connection",
         "连接名称" => "Connection name",
         "管理连接" => "Manage connections",

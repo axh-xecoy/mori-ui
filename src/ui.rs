@@ -1123,6 +1123,7 @@ impl Mori {
         for work in works {
             changed = true;
             match work {
+                Work::Models(id, _) if !self.library.providers.iter().any(|p| p.id == id) => {}
                 Work::Models(id, result) => match result {
                     Ok(models) => {
                         if let Some(p) = self.library.providers.iter_mut().find(|p| p.id == id) {

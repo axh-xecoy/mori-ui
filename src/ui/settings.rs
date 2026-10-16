@@ -337,6 +337,51 @@ impl Mori {
         self.persist();
         cx.notify();
     }
+    pub(super) fn remove_connection(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.library.providers.iter().position(|p| p.id == id) else {
+            return;
+        };
+        let in_use = self.generation.as_ref().is_some_and(|g| {
+            self.library
+                .conversations
+                .iter()
+                .any(|c| c.id == g.conversation && c.provider_id == id)
+        });
+        if in_use || self.media_busy || self.recording.is_some() {
+            self.show_toast("请先停止此连接的回复或音频任务，再删除连接".into());
+            cx.notify();
+            return;
+        }
+        // Test fixtures never access the real system credential store.
+        if self.store.is_some()
+            && let Err(error) = storage::set_api_key(&self.library.providers[index], "")
+        {
+            self.show_toast(format!("无法移除连接密钥：{error:#}"));
+            cx.notify();
+            return;
+        }
+        self.library.providers.remove(index);
+        let selected = if index < self.selected_provider {
+            self.selected_provider.saturating_sub(1)
+        } else {
+            self.selected_provider
+        };
+        self.load_provider(
+            selected.min(self.library.providers.len().saturating_sub(1)),
+            window,
+            cx,
+        );
+        self.provider_picker = false;
+        self.model_picker = false;
+        self.persist();
+        self.show_toast("连接已删除，已有聊天记录保留".into());
+        cx.notify();
+    }
     fn render_connections(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let selected = self.library.providers.get(self.selected_provider);
         if selected.is_none() {
@@ -450,7 +495,20 @@ impl Mori {
                         div()
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
                             .child(provider.name.clone()),
+                    )
+                    .child(
+                        button("delete-connection", "删除连接", "trash")
+                            .flex_shrink_0()
+                            .text_color(rgb(0xc15d48))
+                            .tooltip(tr("移除连接和密钥，保留已有聊天"))
+                            .on_click(cx.listener({
+                                let id = provider.id.clone();
+                                move |this, _, w, cx| this.remove_connection(&id, w, cx)
+                            })),
                     ),
             )
             .child(

@@ -491,6 +491,8 @@ impl Mori {
                             (OpenAiBackend::Auto, "自动识别"),
                             (OpenAiBackend::Standard, "标准兼容"),
                             (OpenAiBackend::LlamaCpp, "llama.cpp"),
+                            (OpenAiBackend::LmStudio, "LM Studio"),
+                            (OpenAiBackend::Vllm, "vLLM / SGLang"),
                         ]
                         .into_iter()
                         .map(|(backend, title)| {

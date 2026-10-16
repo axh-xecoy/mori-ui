@@ -25,6 +25,8 @@ pub enum OpenAiBackend {
     Auto,
     Standard,
     LlamaCpp,
+    LmStudio,
+    Vllm,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

@@ -442,6 +442,22 @@ print(greet("Mori"))
             });
         });
         eprintln!("assistant selection and streaming draft regression: {result:?}");
+        let result=handle.update(cx,|_,window,cx| {
+            view.update(cx,|this,cx| {
+                this.attachments.clear();
+                let target=this.current().unwrap().id.clone();
+                let attachment=Attachment {name:"picture.png".into(),path:std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/mori-128.png").to_string_lossy().into(),mime:"image/png".into(),text:None};
+                for _ in 0..2 {this.work_tx.send(Work::Attach(target.clone(),Ok(vec![attachment.clone()]))).unwrap();}
+                this.poll(cx);assert_eq!(this.attachments.len(),1,"Repeated completion must not duplicate previews");
+                this.new_chat(window,cx);
+                for _ in 0..2 {this.work_tx.send(Work::Attach(target.clone(),Ok(vec![attachment.clone()]))).unwrap();}
+                this.poll(cx);
+                assert!(this.attachments.is_empty());
+                assert_eq!(this.library.conversations.iter().find(|c|c.id==target).unwrap().draft_attachments.len(),1);
+                this.toast=None;cx.notify();
+            });
+        });
+        eprintln!("attachment completion deduplication regression: {result:?}");
         EXPORT_PROBE.with(|count|count.set(Some(0)));
         let _=handle.update(cx,|_,window,cx| {
             view.update(cx,|this,cx|{this.show_toast("关闭提示不应触发下方的导出按钮".into());cx.notify();});

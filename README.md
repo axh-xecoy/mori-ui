@@ -144,3 +144,26 @@ Remove-Item Env:MORI_SNAPSHOT_DIR
 压力检查可设置 `MORI_PERF_CHECK_ONLY=1` 后运行上述原生截图流程：覆盖 4,000 条消息、10,000 行代码、输入交互与嵌套滚动，并打印实际构建行数及耗时。开发构建与发布构建的耗时不能直接比较。
 
 显示兼容：模型回复中成对的中文强调标记支持紧贴引号 / 标点及标记内多余空格，粗体、斜体和粗斜体正常显示；代码、公式、转义和未闭合标记保留原意。这里只调整渲染输入，消息存储和整条消息复制仍保留原文。会话顶部标题折叠换行为单行、超长时省略，已有会话也适用。
+
+### 思考开关与兼容后端
+
+OpenAI 兼容是消息接口兼容，并不意味着所有服务使用同一个思考参数。连接设置可选择自动识别、标准兼容、llama.cpp、LM Studio 或 vLLM / SGLang。自建服务地址不包含后端信息时，请选择实际后端；“OpenAI”连接名称本身不代表官方服务。
+
+| 服务 / 后端 | 显式开关使用的字段 |
+| --- | --- |
+| Ollama | `think` |
+| llama.cpp、vLLM / SGLang、通用 Qwen 兼容服务 | `chat_template_kwargs.enable_thinking` |
+| LM Studio | `reasoning_effort`（关闭 `none`，开启默认 `medium`） |
+| 百炼、SiliconFlow | `enable_thinking` |
+| DeepSeek | `thinking.type` |
+| OpenRouter | `reasoning.enabled` |
+| Anthropic | `thinking.type` 与预算 |
+| Gemini 2.5 Flash | `extra_body.google.thinking_config.thinking_budget` |
+| Groq Qwen | `reasoning_effort`，依模型使用 `default` 或具体强度 |
+| 支持非思考的 OpenAI GPT-5.1/5.2/5.4/5.5（排除 Pro） | `reasoning_effort` |
+
+开关显式设置优先于高级参数中的相反开关；开启时保留用户设置的有效思考强度或预算。自动模式不覆盖这些高级参数。不支持非思考的模型不能通过隐藏思考文本来伪装关闭。LM Studio 需要服务端版本和模型模板支持该字段，旧版可能忽略请求；遇到此情况需要更新运行时或检查模板。
+
+规范参考：[OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning)、[LM Studio API 与兼容限制讨论](https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/988)、[Qwen vLLM](https://github.com/QwenLM/Qwen3/blob/main/docs/source/deployment/vllm.md)、[百炼](https://help.aliyun.com/zh/model-studio/deep-thinking/)、[Gemini OpenAI 兼容](https://ai.google.dev/gemini-api/docs/openai)、[Groq reasoning](https://console.groq.com/docs/reasoning)。
+
+新附件按 SHA-256 存储并复用同内容文件；静态 PNG 会统一编码以复用文件与剪贴板入口。原始附件名称属于会话元数据，不参与存储去重。历史文件保持可读，不自动删除旧引用；同一草稿不会重复显示同一路径的附件。

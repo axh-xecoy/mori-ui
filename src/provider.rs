@@ -224,6 +224,12 @@ fn backend_from_models(value: &Value) -> OpenAiBackend {
             .any(|m| matches!(m["owned_by"].as_str(), Some("llamacpp" | "llama.cpp")))
     }) {
         OpenAiBackend::LlamaCpp
+    } else if value["data"].as_array().is_some_and(|models| {
+        models
+            .iter()
+            .any(|m| matches!(m["owned_by"].as_str(), Some("lmstudio" | "lm-studio")))
+    }) {
+        OpenAiBackend::LmStudio
     } else {
         OpenAiBackend::Standard
     }
@@ -254,6 +260,13 @@ fn cached_backend(provider: &Provider) -> Option<OpenAiBackend> {
 fn resolve_backend(provider: &Provider) -> OpenAiBackend {
     if provider.backend != OpenAiBackend::Auto {
         return provider.backend;
+    }
+    let name = provider.name.to_lowercase().replace([' ', '-', '_'], "");
+    if provider.id == "lm-studio" || name == "lmstudio" {
+        return OpenAiBackend::LmStudio;
+    }
+    if matches!(name.as_str(), "vllm" | "sglang") {
+        return OpenAiBackend::Vllm;
     }
     let base = normalize_base_url(&provider.protocol, &provider.base_url);
     if let Some(backend) = cached_backend(provider) {
@@ -423,56 +436,6 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
             }
         }
     }
-    if let Some(enabled) = request.settings.thinking {
-        let url = request.provider.base_url.to_lowercase();
-        let model = request.conversation.model.to_lowercase();
-        match request.provider.protocol {
-            Protocol::Ollama => body["think"] = json!(enabled),
-            Protocol::Anthropic => {
-                if enabled {
-                    if model.contains("4-6") || model.contains("4-7") {
-                        body["thinking"] = json!({"type":"adaptive"});
-                    } else {
-                        if request.settings.max_tokens > 0 && request.settings.max_tokens < 2048 {
-                            bail!("开启思考需要至少 2048 个输出 token");
-                        }
-                        body["thinking"] = json!({"type":"enabled","budget_tokens":if request.settings.max_tokens == 0 {4096} else {(request.settings.max_tokens / 2).clamp(1024, 4096)}});
-                    }
-                    body.as_object_mut().unwrap().remove("temperature");
-                } else {
-                    body["thinking"] = json!({"type":"disabled"});
-                }
-            }
-            Protocol::OpenAi => {
-                if request.provider.backend == OpenAiBackend::LlamaCpp {
-                    body["chat_template_kwargs"] = json!({"enable_thinking":enabled});
-                } else if url.contains("openrouter.ai") {
-                    body["reasoning"] = json!({"enabled":enabled});
-                } else if url.contains("deepseek.com") {
-                    body["thinking"] = json!({"type":if enabled {"enabled"} else {"disabled"}});
-                } else if model.contains("qwen")
-                    || url.contains("dashscope")
-                    || url.contains("siliconflow")
-                {
-                    body["enable_thinking"] = json!(enabled);
-                } else if model.starts_with("gpt-5.1") || model.starts_with("gpt-5.2") {
-                    body["reasoning_effort"] = json!(if enabled { "medium" } else { "none" });
-                } else if model.starts_with("o1")
-                    || model.starts_with("o3")
-                    || model.starts_with("o4")
-                    || model.starts_with("gpt-5")
-                    || model.starts_with("gpt-6")
-                {
-                    if !enabled {
-                        bail!("此模型无法保证关闭思考，请选择支持非思考模式的模型或使用自动模式");
-                    }
-                    body["reasoning_effort"] = json!("medium");
-                } else {
-                    bail!("当前模型或服务商尚未适配思考开关，请使用自动模式或选择支持的模型");
-                }
-            }
-        }
-    }
     if !tools.is_empty() && request.provider.protocol != Protocol::Anthropic {
         body["tools"] = json!(tools);
     }
@@ -487,6 +450,157 @@ fn body(request: &Request, history: &[Message], tools: &[Value]) -> Result<Value
         .get(&request.conversation.model)
     {
         apply_parameters(&mut body, &config.parameters, &request.provider.protocol)?;
+    }
+    if let Some(enabled) = request.settings.thinking {
+        let url = request.provider.base_url.to_lowercase();
+        let model = request.conversation.model.to_lowercase();
+        let effort = body["reasoning_effort"]
+            .as_str()
+            .filter(|v| matches!(*v, "minimal" | "low" | "medium" | "high" | "xhigh" | "max"))
+            .unwrap_or("medium")
+            .to_owned();
+        match request.provider.protocol {
+            Protocol::Ollama => body["think"] = json!(enabled),
+            Protocol::Anthropic => {
+                if enabled {
+                    if model.contains("4-6") || model.contains("4-7") {
+                        body["thinking"] = json!({"type":"adaptive"});
+                    } else {
+                        let max = body["max_tokens"].as_u64().unwrap_or(0);
+                        if max > 0 && max < 2048 {
+                            bail!("开启思考需要至少 2048 个输出 token");
+                        }
+                        let budget =
+                            body["thinking"]["budget_tokens"]
+                                .as_u64()
+                                .unwrap_or_else(|| {
+                                    if max == 0 {
+                                        4096
+                                    } else {
+                                        (max / 2).clamp(1024, 4096)
+                                    }
+                                });
+                        body["thinking"] = json!({"type":"enabled","budget_tokens":budget});
+                    }
+                    body.as_object_mut().unwrap().remove("temperature");
+                } else {
+                    body["thinking"] = json!({"type":"disabled"});
+                }
+            }
+            Protocol::OpenAi => {
+                if request.provider.backend == OpenAiBackend::LmStudio {
+                    body["reasoning_effort"] =
+                        json!(if enabled { effort.as_str() } else { "none" });
+                    for key in [
+                        "enable_thinking",
+                        "chat_template_kwargs",
+                        "thinking",
+                        "reasoning",
+                    ] {
+                        body.as_object_mut().unwrap().remove(key);
+                    }
+                } else if matches!(
+                    request.provider.backend,
+                    OpenAiBackend::LlamaCpp | OpenAiBackend::Vllm
+                ) {
+                    if !body["chat_template_kwargs"].is_object() {
+                        body["chat_template_kwargs"] = json!({});
+                    }
+                    body["chat_template_kwargs"]["enable_thinking"] = json!(enabled);
+                    for key in [
+                        "enable_thinking",
+                        "reasoning_effort",
+                        "thinking",
+                        "reasoning",
+                    ] {
+                        body.as_object_mut().unwrap().remove(key);
+                    }
+                } else if url.contains("openrouter.ai") {
+                    body["reasoning"] = json!({"enabled":enabled});
+                } else if url.contains("deepseek.com") {
+                    body["thinking"] = json!({"type":if enabled {"enabled"} else {"disabled"}});
+                } else if url.contains("generativelanguage.googleapis.com") {
+                    if !enabled && (model.contains("-pro") || model.starts_with("gemini-3")) {
+                        bail!(
+                            "此 Gemini 模型不支持完全关闭思考，请使用自动模式或支持关闭思考的 Flash 模型"
+                        );
+                    }
+                    if model.starts_with("gemini-2.5") {
+                        body["extra_body"]["google"]["thinking_config"]["thinking_budget"] =
+                            json!(if enabled { -1 } else { 0 });
+                    } else if model.starts_with("gemini-3") {
+                        body["extra_body"]["google"]["thinking_config"]["thinking_level"] =
+                            json!("medium");
+                    } else {
+                        bail!("当前 Gemini 模型未适配思考开关，请使用自动模式");
+                    }
+                    body.as_object_mut().unwrap().remove("reasoning_effort");
+                } else if url.contains("api.groq.com") {
+                    if model.contains("qwen3") {
+                        body["reasoning_effort"] = json!(if !enabled {
+                            "none"
+                        } else if model.contains("qwen3-32b") {
+                            "default"
+                        } else {
+                            "medium"
+                        });
+                    } else if model.contains("gpt-oss") {
+                        if !enabled {
+                            bail!("Groq 的 GPT-OSS 不支持关闭思考，请使用自动模式");
+                        }
+                        body["reasoning_effort"] = json!("medium");
+                    } else {
+                        bail!("当前 Groq 模型未适配思考开关，请使用自动模式");
+                    }
+                } else if url.contains("dashscope") || url.contains("siliconflow") {
+                    body["enable_thinking"] = json!(enabled);
+                    for key in [
+                        "chat_template_kwargs",
+                        "reasoning_effort",
+                        "thinking",
+                        "reasoning",
+                    ] {
+                        body.as_object_mut().unwrap().remove(key);
+                    }
+                } else if ["gpt-5.1", "gpt-5.2", "gpt-5.4", "gpt-5.5"]
+                    .iter()
+                    .any(|prefix| model.rsplit('/').next().unwrap_or("").starts_with(prefix))
+                    && !model.contains("-pro")
+                {
+                    body["reasoning_effort"] =
+                        json!(if enabled { effort.as_str() } else { "none" });
+                } else if model.starts_with("o1")
+                    || model.starts_with("o3")
+                    || model.starts_with("o4")
+                    || model.starts_with("gpt-5")
+                    || model.starts_with("gpt-6")
+                {
+                    if !enabled {
+                        bail!("此模型无法保证关闭思考，请选择支持非思考模式的模型或使用自动模式");
+                    }
+                    body["reasoning_effort"] = json!("medium");
+                } else if model.contains("qwen") && !url.contains("api.openai.com") {
+                    if !body["chat_template_kwargs"].is_object() {
+                        body["chat_template_kwargs"] = json!({});
+                    }
+                    body["chat_template_kwargs"]["enable_thinking"] = json!(enabled);
+                    for key in [
+                        "enable_thinking",
+                        "reasoning_effort",
+                        "thinking",
+                        "reasoning",
+                    ] {
+                        body.as_object_mut().unwrap().remove(key);
+                    }
+                } else if !enabled && (model.starts_with("gpt-4") || model.starts_with("gpt-3.5")) {
+                    // Non-reasoning models are already in the requested off state.
+                } else {
+                    bail!(
+                        "当前模型或服务商尚未适配思考开关，请使用自动模式或在连接设置中选择正确的兼容后端"
+                    );
+                }
+            }
+        }
     }
     if request.provider.protocol == Protocol::OpenAi
         && request.provider.backend == OpenAiBackend::LlamaCpp
@@ -1126,7 +1240,7 @@ mod tests {
         }
     }
     #[test]
-    fn llama_automatic_mode_preserves_custom_defaults_and_standard_backend_is_unchanged() {
+    fn llama_automatic_mode_preserves_custom_defaults_and_generic_qwen_uses_template() {
         let mut req = request(Protocol::OpenAi, "http://localhost".into());
         req.provider.backend = OpenAiBackend::LlamaCpp;
         req.settings.thinking = None;
@@ -1148,8 +1262,8 @@ mod tests {
         req.conversation.model = "qwen-plus".into();
         req.settings.thinking = Some(false);
         let value = body(&req, &[], &[]).unwrap();
-        assert_eq!(value["enable_thinking"], false);
-        assert!(value.get("chat_template_kwargs").is_none());
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(value.get("enable_thinking").is_none());
         assert_eq!(resolve_backend(&req.provider), OpenAiBackend::Standard);
     }
     #[test]
@@ -1603,6 +1717,112 @@ mod tests {
             worker.join().unwrap();
             handle.join().unwrap();
         }
+    }
+    #[test]
+    fn lmstudio_and_vllm_switches_reach_the_http_request() {
+        for backend in [OpenAiBackend::LmStudio, OpenAiBackend::Vllm] {
+            for enabled in [false, true] {
+                let (url, requests, handle) = server(vec![Response::sse(&[
+                    json!({"choices":[{"delta":{"reasoning":"analysis","content":"answer"}}]}),
+                    json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+                ])]);
+                let mut req = request(Protocol::OpenAi, url);
+                req.provider.backend = backend;
+                req.conversation.model = "qwen3.6-35b-a3b".into();
+                req.settings.thinking = Some(enabled);
+                let (tx, rx) = mpsc::channel();
+                run(req, tx, Arc::new(AtomicBool::new(false)));
+                let events = rx.iter().collect::<Vec<_>>();
+                handle.join().unwrap();
+                let (headers, value) = requests.recv().unwrap();
+                assert!(headers.starts_with("POST /chat/completions "));
+                if backend == OpenAiBackend::LmStudio {
+                    assert_eq!(
+                        value["reasoning_effort"],
+                        if enabled { "medium" } else { "none" }
+                    );
+                } else {
+                    assert_eq!(value["chat_template_kwargs"]["enable_thinking"], enabled);
+                }
+                assert!(value.get("enable_thinking").is_none());
+                assert!(events.iter().any(|e|matches!(e,Event::Message(m) if m.content=="answer" && m.reasoning=="analysis")));
+                assert!(!events.iter().any(|e| matches!(e, Event::Error(_))));
+            }
+        }
+    }
+    #[test]
+    fn thinking_dialects_follow_backend_and_explicit_switch_wins() {
+        let mut req = request(Protocol::OpenAi, "http://localhost:1234/v1".into());
+        req.conversation.model = "qwen3.6-35b-a3b".into();
+        for backend in [
+            OpenAiBackend::LmStudio,
+            OpenAiBackend::Vllm,
+            OpenAiBackend::Standard,
+        ] {
+            req.provider.backend = backend;
+            for enabled in [false, true] {
+                req.settings.thinking = Some(enabled);
+                req.settings.request_parameters = serde_json::from_value(json!({"enable_thinking":!enabled,"chat_template_kwargs":{"enable_thinking":!enabled,"preserve_thinking":true},"reasoning_effort":"high"})).unwrap();
+                let value = body(&req, &[], &[]).unwrap();
+                if backend == OpenAiBackend::LmStudio {
+                    assert_eq!(
+                        value["reasoning_effort"],
+                        if enabled { "high" } else { "none" }
+                    );
+                    assert!(value.get("chat_template_kwargs").is_none());
+                } else {
+                    assert_eq!(value["chat_template_kwargs"]["enable_thinking"], enabled);
+                    assert_eq!(value["chat_template_kwargs"]["preserve_thinking"], true);
+                }
+                assert!(value.get("enable_thinking").is_none());
+            }
+        }
+        req.provider.backend = OpenAiBackend::Auto;
+        req.provider.name = "LM Studio".into();
+        assert_eq!(resolve_backend(&req.provider), OpenAiBackend::LmStudio);
+        req.provider.backend = OpenAiBackend::Standard;
+        req.settings.request_parameters.clear();
+        for enabled in [false, true] {
+            req.settings.thinking = Some(enabled);
+            for (url, key) in [
+                (
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "enable_thinking",
+                ),
+                ("https://api.siliconflow.cn/v1", "enable_thinking"),
+            ] {
+                req.provider.base_url = url.into();
+                assert_eq!(body(&req, &[], &[]).unwrap()[key], enabled);
+            }
+            req.provider.base_url = "https://api.groq.com/openai/v1".into();
+            req.conversation.model = "qwen/qwen3-32b".into();
+            assert_eq!(
+                body(&req, &[], &[]).unwrap()["reasoning_effort"],
+                if enabled { "default" } else { "none" }
+            );
+            req.provider.base_url =
+                "https://generativelanguage.googleapis.com/v1beta/openai".into();
+            req.conversation.model = "gemini-2.5-flash".into();
+            assert_eq!(
+                body(&req, &[], &[]).unwrap()["extra_body"]["google"]["thinking_config"]["thinking_budget"],
+                if enabled { -1 } else { 0 }
+            );
+        }
+        req.settings.thinking = Some(false);
+        req.conversation.model = "gemini-2.5-pro".into();
+        assert!(body(&req, &[], &[]).is_err());
+        req.provider.base_url = "https://api.openai.com/v1".into();
+        req.conversation.model = "gpt-5.4".into();
+        assert_eq!(body(&req, &[], &[]).unwrap()["reasoning_effort"], "none");
+        req.conversation.model = "gpt-4.1".into();
+        assert!(
+            body(&req, &[], &[])
+                .unwrap()
+                .get("reasoning_effort")
+                .is_none()
+        );
+        req.settings.thinking = Some(true);
+        assert!(body(&req, &[], &[]).is_err());
     }
     #[test]
     fn thinking_controls_follow_provider_protocol_and_auto_keeps_old_requests() {

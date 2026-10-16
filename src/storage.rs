@@ -1,8 +1,9 @@
 use crate::model::*;
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn decode_clipboard_image(bytes: &[u8]) -> Result<image::DynamicImage> {
@@ -18,12 +19,24 @@ fn decode_clipboard_image(bytes: &[u8]) -> Result<image::DynamicImage> {
     reader.decode().context("剪贴板图片无法读取")
 }
 
-fn image_fingerprint(decoded: &image::DynamicImage) -> u64 {
+fn image_fingerprint(decoded: &image::DynamicImage) -> [u8; 32] {
     let pixels = decoded.to_rgba8();
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    pixels.dimensions().hash(&mut hash);
-    pixels.as_raw().hash(&mut hash);
-    hash.finish()
+    let mut hash = Sha256::new();
+    hash.update(pixels.width().to_le_bytes());
+    hash.update(pixels.height().to_le_bytes());
+    hash.update(pixels.as_raw());
+    hash.finalize().into()
+}
+
+pub fn extend_unique_attachments(target: &mut Vec<Attachment>, incoming: Vec<Attachment>) {
+    for attachment in incoming {
+        if !target
+            .iter()
+            .any(|existing| existing.path == attachment.path)
+        {
+            target.push(attachment);
+        }
+    }
 }
 
 pub struct Store {
@@ -179,6 +192,7 @@ impl Store {
             "jpg" | "jpeg" => "image/jpeg",
             "webp" => "image/webp",
             "gif" => "image/gif",
+            "bmp" => "image/bmp",
             "pdf" => "application/pdf",
             _ => "text/plain",
         };
@@ -195,11 +209,24 @@ impl Store {
         } else {
             None
         };
-        let saved = self
-            .root
-            .join("attachments")
-            .join(format!("{}.{}", id(), ext));
-        std::fs::copy(path, &saved)?;
+        let bytes = std::fs::read(path)?;
+        // Canonical PNG encoding makes file imports and clipboard PNGs share
+        // one blob even when source metadata/compression differ.
+        let animated_png = ext == "png"
+            && image::codecs::png::PngDecoder::new(std::io::Cursor::new(&bytes))?.is_apng()?;
+        let saved = if ext == "png" && !animated_png {
+            let decoded = decode_clipboard_image(&bytes)?;
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(decoded.to_rgba8())
+                .write_to(&mut png, image::ImageFormat::Png)?;
+            if png.get_ref().len() <= 20 * 1024 * 1024 {
+                self.save_media(png.get_ref(), "png")?
+            } else {
+                self.save_media(&bytes, &ext)?
+            }
+        } else {
+            self.save_media(&bytes, &ext)?
+        };
         Ok(Attachment {
             name: path
                 .file_name()
@@ -217,7 +244,8 @@ impl Store {
     }
     fn save_clipboard_image(&self, decoded: &image::DynamicImage) -> Result<Attachment> {
         let mut png = std::io::Cursor::new(Vec::new());
-        decoded.write_to(&mut png, image::ImageFormat::Png)?;
+        image::DynamicImage::ImageRgba8(decoded.to_rgba8())
+            .write_to(&mut png, image::ImageFormat::Png)?;
         if png.get_ref().len() > 20 * 1024 * 1024 {
             anyhow::bail!("附件上限为 20 MB");
         }
@@ -245,16 +273,35 @@ impl Store {
                     let attachment = self.attach(path)?;
                     if attachment.mime.starts_with("image/") {
                         let bytes = std::fs::read(&attachment.path)?;
-                        if let Ok(decoded) = decode_clipboard_image(&bytes) {
-                            images_seen.insert(image_fingerprint(&decoded));
+                        if let Ok(decoded) = decode_clipboard_image(&bytes)
+                            && !images_seen.insert(image_fingerprint(&decoded))
+                        {
+                            continue;
                         }
                     }
                     attachments.push(attachment);
                 }
             }
         }
+        // A clipboard bitmap is a rendering of the copied image file (QQ/Photos
+        // can re-encode or flatten transparency). Prefer the original in this
+        // unambiguous case, even when decoded pixels differ.
+        let single_file_image = attachments
+            .iter()
+            .filter(|a| a.mime.starts_with("image/"))
+            .count()
+            == 1
+            && item
+                .entries
+                .iter()
+                .filter(|e| matches!(e, ClipboardEntry::Image(_)))
+                .count()
+                == 1;
         for entry in &item.entries {
             if let ClipboardEntry::Image(image) = entry {
+                if single_file_image {
+                    continue;
+                }
                 let decoded = decode_clipboard_image(image.bytes())?;
                 if images_seen.insert(image_fingerprint(&decoded)) {
                     attachments.push(self.save_clipboard_image(&decoded)?);
@@ -264,11 +311,49 @@ impl Store {
         Ok(attachments)
     }
     pub fn save_media(&self, bytes: &[u8], ext: &str) -> Result<PathBuf> {
-        let path = self
-            .root
-            .join("attachments")
-            .join(format!("{}.{}", id(), ext));
-        std::fs::write(&path, bytes)?;
+        let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+        if !ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            bail!("无效的附件扩展名");
+        }
+        let ext = if ext == "jpeg" { "jpg" } else { &ext };
+        let directory = self.root.join("attachments");
+        std::fs::create_dir_all(&directory)?;
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let path = directory.join(if ext.is_empty() {
+            digest
+        } else {
+            format!("{digest}.{ext}")
+        });
+        if path.exists() {
+            if std::fs::read(&path)? != bytes {
+                bail!("附件哈希文件损坏，未覆盖已有文件");
+            }
+            return Ok(path);
+        }
+        // Publish a fully written file atomically without replacing a concurrent
+        // import's destination. No conversation can observe a half-written blob.
+        let temporary = directory.join(format!(".{}.tmp", id()));
+        let result = (|| -> Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            match std::fs::hard_link(&temporary, &path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if std::fs::read(&path)? != bytes {
+                        bail!("附件哈希文件损坏");
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
+            }
+        })();
+        let _ = std::fs::remove_file(&temporary);
+        result?;
         Ok(path)
     }
 }
@@ -559,8 +644,20 @@ mod tests {
             std::fs::read_dir(root.join("attachments")).unwrap().count(),
             2
         );
-        // Repeating a paste is a separate action and remains allowed.
+        // Repeating a paste is a separate action, but reuses the stored blobs.
         assert_eq!(store.clipboard_attachments(&item).unwrap().len(), 2);
+        let mut png_bytes = std::io::Cursor::new(Vec::new());
+        picture
+            .write_to(&mut png_bytes, image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(
+            store.clipboard_image(png_bytes.get_ref()).unwrap().path,
+            imported[0].path
+        );
+        assert_eq!(
+            std::fs::read_dir(root.join("attachments")).unwrap().count(),
+            2
+        );
         let different = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             4,
             3,
@@ -576,6 +673,67 @@ mod tests {
             png.into_inner(),
         )));
         assert_eq!(store.clipboard_attachments(&mixed).unwrap().len(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn clipboard_file_aliases_and_content_addressed_media_are_deduplicated() {
+        use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
+        let root = std::env::temp_dir().join(format!("mori-content-test-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::at(root.clone());
+        let original = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            4,
+            3,
+            image::Rgba([12, 34, 56, 100]),
+        ));
+        let path = root.join("picture.png");
+        original.save(&path).unwrap();
+        // A Windows viewer's bitmap can flatten/remove alpha while retaining
+        // the original file in CF_HDROP. It is still one copied image.
+        let mut bmp = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(original.to_rgb8())
+            .write_to(&mut bmp, image::ImageFormat::Bmp)
+            .unwrap();
+        let item = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::ExternalPaths(ExternalPaths(vec![path.clone()].into())),
+                ClipboardEntry::Image(Image::from_bytes(ImageFormat::Bmp, bmp.into_inner())),
+            ],
+        };
+        let first = store.clipboard_attachments(&item).unwrap();
+        assert_eq!(first.len(), 1);
+        let second = store.clipboard_attachments(&item).unwrap();
+        assert_eq!(first[0].path, second[0].path);
+        let mut draft = first;
+        extend_unique_attachments(&mut draft, second);
+        assert_eq!(draft.len(), 1);
+        assert_eq!(
+            std::fs::read_dir(root.join("attachments")).unwrap().count(),
+            1
+        );
+        let copied = root.join("another-name.png");
+        std::fs::copy(&path, &copied).unwrap();
+        assert_eq!(store.attach(&copied).unwrap().path, draft[0].path);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    assert_eq!(
+                        store.save_media(b"concurrent content", "txt").unwrap(),
+                        store.save_media(b"concurrent content", "txt").unwrap()
+                    );
+                });
+            }
+        });
+        assert_eq!(
+            std::fs::read_dir(root.join("attachments")).unwrap().count(),
+            2
+        );
+        let legacy = root.join("attachments/legacy.png");
+        std::fs::copy(&path, &legacy).unwrap();
+        assert!(
+            legacy.exists(),
+            "Old paths remain readable without migration"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

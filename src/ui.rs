@@ -1183,12 +1183,15 @@ impl Mori {
                     match result {
                         Ok(a) => {
                             if self.library.active_id.as_deref() == Some(&id) {
-                                self.attachments.extend(a);
+                                crate::storage::extend_unique_attachments(&mut self.attachments, a);
                                 self.stash_draft(cx);
                             } else if let Some(c) =
                                 self.library.conversations.iter_mut().find(|c| c.id == id)
                             {
-                                c.draft_attachments.extend(a);
+                                crate::storage::extend_unique_attachments(
+                                    &mut c.draft_attachments,
+                                    a,
+                                );
                                 self.show_toast("附件已添加到原会话草稿".into());
                             } else {
                                 self.show_toast("原会话已删除，附件未加入其他会话".into());
